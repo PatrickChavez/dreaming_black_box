@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,">
-    <title>Dream Datamosh — AI Narrative & Glitch Studio</title>
+    <title>Dream Datamosh - AI Narrative & Glitch Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -87,10 +87,10 @@
         <!-- Header -->
         <div class="mb-10">
             <h1 class="text-2xl font-semibold tracking-widest glitch mb-1.5">DREAM DATAMOSH STUDIO</h1>
-            <p class="text-zinc-500 text-xs">Upload video → AI subtitle glitch → story therapy → dream image</p>
+            <p class="text-zinc-500 text-xs">Upload video -> AI dream narrative -> reflective dialogue -> generated dream image</p>
         </div>
 
-        <!-- API Key -->
+        <!-- Server API Key Status -->
         <details class="group mb-5">
             <summary
                 class="flex items-center gap-2 text-xs text-zinc-500 cursor-pointer select-none hover:text-zinc-300 list-none">
@@ -98,14 +98,15 @@
                     stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                 </svg>
-                OPENAI API KEY
-                <span id="apiKeyBadge" class="text-green-500 text-xs hidden">● saved</span>
+                SERVER OPENAI KEY
             </summary>
             <div class="mt-2.5 bg-zinc-900 border border-zinc-800 rounded-lg p-3.5">
-                <input type="password" id="apiKey" placeholder="sk-..."
-                    class="w-full bg-zinc-800 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
-                    oninput="saveApiKey(this.value)">
-                <p class="text-xs text-zinc-600 mt-2">Stored in your browser only — never sent anywhere except OpenAI.
+                <p id="serverKeyStatus" class="text-xs text-zinc-400 mb-2">
+                    Checking server key status...
+                </p>
+                <p class="text-xs text-zinc-500 mt-1">
+                    This app now uses <code>OPENAI_API_KEY</code> from the Flask server environment.
+                    Your browser no longer stores or sends your API key.
                 </p>
             </div>
         </details>
@@ -192,7 +193,7 @@
         <!-- Process Button -->
         <button id="processBtn" onclick="processVideo()"
             class="w-full py-3 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2">
-            Process & Generate Narrative
+            Process Video & Begin Dream
         </button>
 
         <!-- Result Section -->
@@ -242,14 +243,14 @@
 
             <!-- Image Generation Section -->
             <div id="imageSection" class="hidden">
-                <h2 class="text-sm font-semibold text-zinc-400 mb-3 uppercase tracking-wider">Generate Dream Image</h2>
+                <h2 class="text-sm font-semibold text-zinc-400 mb-3 uppercase tracking-wider">Dream Image Finale</h2>
                 <div class="space-y-3">
-                    <textarea id="imagePrompt" rows="2" placeholder="Describe the dream image you'd like to generate..."
+                    <textarea id="imagePrompt" rows="2" placeholder="Final dream image prompt (auto-filled from the narrative)..."
                         class="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"></textarea>
                     <button onclick="generateDreamImage()"
                         class="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
                         id="genImgBtn">
-                        Generate Image
+                        Generate Final Dream Image
                     </button>
                 </div>
                 <div id="generatedImage" class="mt-4 hidden">
@@ -351,21 +352,26 @@
         }
 
         window.onload = () => {
-            const key = localStorage.getItem('openai_api_key');
-            if (key) {
-                document.getElementById('apiKey').value = key;
-                document.getElementById('apiKeyBadge').classList.remove('hidden');
-            }
             checkServerMode();
+            refreshServerKeyIndicator();
         };
 
-        function saveApiKey(val) {
-            if (val.trim()) {
-                localStorage.setItem('openai_api_key', val.trim());
-                document.getElementById('apiKeyBadge').classList.remove('hidden');
-            } else {
-                localStorage.removeItem('openai_api_key');
-                document.getElementById('apiKeyBadge').classList.add('hidden');
+        async function refreshServerKeyIndicator() {
+            const statusEl = document.getElementById('serverKeyStatus');
+            if (!statusEl) return;
+
+            try {
+                const ping = await resolveApiBase();
+                if (ping.openai_configured) {
+                    statusEl.textContent = 'Server key detected';
+                    statusEl.className = 'text-xs text-emerald-400 mb-2';
+                } else {
+                    statusEl.textContent = 'Server key missing (set OPENAI_API_KEY)';
+                    statusEl.className = 'text-xs text-red-400 mb-2';
+                }
+            } catch (_) {
+                statusEl.textContent = 'Server unreachable';
+                statusEl.className = 'text-xs text-amber-400 mb-2';
             }
         }
 
@@ -444,6 +450,10 @@
                     showError(`${hint} (You can also set FFMPEG_PATH env variable.)`);
                     return;
                 }
+                if (currentMode === 'ai' && !ping.openai_configured) {
+                    showError('Server OpenAI API key is missing. Set OPENAI_API_KEY and restart the Flask app.');
+                    return;
+                }
             } catch (e) {
                 showError('Cannot reach the server. Start it with <code>python app.py</code>, then open <code>http://127.0.0.1:5000</code>. Error: ' + e.message + networkDebugInfo());
                 return;
@@ -458,11 +468,8 @@
 
             if (currentMode === 'ai') {
                 const prompt = document.getElementById('prompt').value.trim();
-                const apiKey = document.getElementById('apiKey').value.trim();
                 if (!prompt) { showError('Please describe the effect you want.'); resetBtn(); return; }
-                if (!apiKey) { showError('Please enter your OpenAI API key (click the key section above).'); resetBtn(); return; }
                 fd.append('prompt', prompt);
-                fd.append('api_key', apiKey);
                 fd.append('use_manual', 'false');
             } else {
                 fd.append('use_manual', 'true');
@@ -480,6 +487,7 @@
                     currentJobId = data.job_id;
                     showResult(data);
                     showNarrativeSection();
+                    applyDreamBootstrap(data);
                 } else {
                     showError(data.error || 'Processing failed.');
                 }
@@ -515,6 +523,19 @@
             document.getElementById('imagePrompt').value = '';
         }
 
+        function applyDreamBootstrap(data) {
+            const fallback = "I dreamed your video as a looping memory made of light, motion, and unfinished feelings. What do you think this dream is trying to tell us?";
+            if (!data.dream) {
+                typewriterDisplay(fallback);
+                document.getElementById('imagePrompt').value = fallback;
+                return;
+            }
+            const firstNarrative = (data.dream.initial_narrative || '').trim();
+            const suggestedPrompt = (data.dream.suggested_image_prompt || '').trim();
+            typewriterDisplay(firstNarrative || fallback);
+            document.getElementById('imagePrompt').value = suggestedPrompt || firstNarrative || fallback;
+        }
+
         function showError(msg) {
             const container = document.getElementById('errorContainer');
             container.innerHTML = `
@@ -527,15 +548,12 @@
         function resetBtn() {
             const btn = document.getElementById('processBtn');
             btn.disabled = false;
-            btn.innerHTML = 'Process & Generate Narrative';
+            btn.innerHTML = 'Process Video & Begin Dream';
         }
 
         async function continueNarrative() {
             const input = document.getElementById('narrativeInput').value.trim();
             if (!input) return;
-
-            const apiKey = document.getElementById('apiKey').value.trim();
-            if (!apiKey) { showError('API key is required.'); return; }
 
             const useHistory = document.getElementById('useHistory').checked;
             const btn = document.querySelector('#narrativeSection button');
@@ -549,7 +567,6 @@
                     body: JSON.stringify({
                         job_id: currentJobId,
                         message: input,
-                        api_key: apiKey,
                         use_history: useHistory
                     })
                 });
@@ -557,7 +574,9 @@
                 if (data.success) {
                     typewriterDisplay(data.narrative);
                     document.getElementById('narrativeInput').value = '';
-                    document.getElementById('imagePrompt').value = data.narrative; // Pre-fill image prompt
+                    if (data.suggested_image_prompt) {
+                        document.getElementById('imagePrompt').value = data.suggested_image_prompt;
+                    }
                     hideError();
                 } else {
                     showError(data.error || 'Failed to generate narrative.');
@@ -574,9 +593,6 @@
             const prompt = document.getElementById('imagePrompt').value.trim();
             if (!prompt) { showError('Please provide an image description.'); return; }
 
-            const apiKey = document.getElementById('apiKey').value.trim();
-            if (!apiKey) { showError('API key is required.'); return; }
-
             const btn = document.getElementById('genImgBtn');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span> Generating…';
@@ -587,8 +603,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         job_id: currentJobId,
-                        prompt: prompt,
-                        api_key: apiKey
+                        prompt: prompt
                     })
                 });
                 const data = await res.json();
@@ -604,7 +619,7 @@
                 showError('Network error: ' + e.message + networkDebugInfo());
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = 'Generate Image';
+                btn.innerHTML = 'Generate Final Dream Image';
             }
         }
 
@@ -645,5 +660,6 @@
 </body>
 
 </html>
+
 
 

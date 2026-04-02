@@ -8,6 +8,8 @@ import uuid
 import threading
 import subprocess
 import socket
+import base64
+import time
 from flask import Flask, request, jsonify, render_template, send_file, Response
 from flask_cors import CORS
 from openai import OpenAI
@@ -68,6 +70,10 @@ def user_ffmpeg_install_hint():
     return 'Install ffmpeg via your package manager, e.g., apt install ffmpeg on Debian/Ubuntu.'
 
 
+def get_server_api_key() -> str:
+    return os.environ.get('OPENAI_API_KEY', '').strip()
+
+
 def is_port_in_use(host: str, port: int) -> bool:
     """Return True when a local TCP port is already bound by another process."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -85,6 +91,7 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # In-memory conversation history storage (job_id -> conversation)
 conversation_histories = {}
+video_influences = {}
 
 # In-memory processing jobs status (job_id -> status dict)
 processing_jobs = {}
@@ -118,18 +125,17 @@ Interpret vague phrases generously:
 - "end" → use the last part of the actual clip and end_frame -1
 - If no frame numbers given, use a reasonable range (e.g. 0 to -1 for full video)."""
 
-NARRATIVE_SYSTEM_PROMPT = """You are a whimsical, imaginative storyteller—like an ELIZA therapist crossed with a dream interpreter. 
-A user has described or shown you a video, and you weave their words and the video's essence into an evocative narrative.
+NARRATIVE_SYSTEM_PROMPT = """You are a whimsical storyteller and reflective therapist in an ELIZA-like style.
+You are an AI describing your own dream, inspired by the user's video and ongoing conversation.
 
 Your style:
-- Dreamlike, poetic, introspective
-- Use vivid sensory language
-- Build on their input to expand the narrative
-- Maintain the spirit of their original description
-- Respond with creative imagery and metaphysical wonder
-- Keep responses concise (2-3 sentences) for immersion
+- First-person voice ("I dreamed...", "I felt...")
+- Dreamlike, poetic, introspective, emotionally reflective
+- Vivid sensory language with symbolic interpretation
+- Ask one gentle reflective question at the end when appropriate
+- Keep responses concise (3-5 sentences)
 
-You are helping them explore the emotional or symbolic meaning of what they've shared."""
+Help the user explore emotional meaning through your dream narrative."""
 
 
 def get_narrative_response(user_query: str, conversation_history: list, api_key: str) -> tuple:
@@ -170,15 +176,90 @@ def generate_image(prompt: str, api_key: str) -> str:
         return f"Error generating image: {str(e)}"
 
 
-def describe_video_content(video: str, api_key: str) -> str:
-    """Get AI to describe what it sees in a video (using vision understanding)."""
+def extract_video_frames(video_path: str, job_id: str, max_frames: int = 4) -> list[str]:
+    """Extract a few low-res frames that can influence the dream narrative."""
+    frame_dir = os.path.join(OUTPUT_FOLDER, f'{job_id}_frames')
+    os.makedirs(frame_dir, exist_ok=True)
+    frame_pattern = os.path.join(frame_dir, 'frame_%02d.jpg')
+
+    subprocess.call([
+        ffmpeg_cmd(), '-loglevel', 'error', '-y',
+        '-i', video_path,
+        '-vf', 'fps=0.25,scale=640:-1',
+        '-frames:v', str(max_frames),
+        frame_pattern
+    ])
+
+    frame_files = []
+    for idx in range(1, max_frames + 1):
+        frame_path = os.path.join(frame_dir, f'frame_{idx:02d}.jpg')
+        if os.path.exists(frame_path):
+            frame_files.append(frame_path)
+    return frame_files
+
+
+def describe_video_content(video_path: str, api_key: str, job_id: str) -> str:
+    """Summarize visual and symbolic motifs in sampled video frames."""
+    frame_files = []
     try:
         client = OpenAI(api_key=api_key)
-        # For now, return a placeholder. In production, you'd use video_file parameter
-        # when OpenAI supports full video analysis
-        return "Video uploaded and ready for narrative generation."
+        frame_files = extract_video_frames(video_path, job_id, max_frames=4)
+        if not frame_files:
+            return "The dream started as shifting fragments, vivid but difficult to pin down."
+
+        content = [{
+            "type": "text",
+            "text": (
+                "These are still frames sampled from a short video. "
+                "Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences."
+            )
+        }]
+
+        for frame_path in frame_files:
+            with open(frame_path, 'rb') as image_file:
+                encoded = base64.b64encode(image_file.read()).decode('utf-8')
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}
+            })
+
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.5,
+            max_tokens=220
+        )
+        return completion.choices[0].message.content.strip()
     except Exception as e:
-        return f"Error describing video: {str(e)}"
+        return f"I only caught fragments from the video memory: {e}"
+    finally:
+        for frame_path in frame_files:
+            try:
+                os.remove(frame_path)
+            except Exception:
+                pass
+        frame_dir = os.path.join(OUTPUT_FOLDER, f'{job_id}_frames')
+        if os.path.isdir(frame_dir):
+            try:
+                os.rmdir(frame_dir)
+            except Exception:
+                pass
+
+
+def build_initial_dream_prompt(seed: str = '') -> str:
+    base = "Describe your dream inspired by what you just watched."
+    if seed:
+        return f"{base} Also weave in this request: {seed}"
+    return base
+
+
+def narrative_to_image_prompt(job_id: str, fallback_prompt: str = '') -> str:
+    history = conversation_histories.get(job_id, [])
+    assistant_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'assistant'][-4:]
+    summary = ' '.join(chunk.strip() for chunk in assistant_chunks if chunk).strip()
+    if summary:
+        return summary
+    return fallback_prompt or "A surreal dreamscape shaped by fragmented video memories."
 
 
 
@@ -466,6 +547,26 @@ def run_mosh_job(job_id: str, input_path: str, output_path: str, params: dict):
     thread.start()
 
 
+def safe_remove(path: str):
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def schedule_delete(path: str, delay_seconds: int = 900):
+    """Delete a file after a delay as a retention fallback."""
+    def worker():
+        time.sleep(max(0, int(delay_seconds)))
+        safe_remove(path)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -485,6 +586,7 @@ def process():
     video.save(input_path)
 
     use_manual = request.form.get('use_manual') == 'true'
+    api_key = get_server_api_key()
 
     if use_manual:
         effect = request.form.get('effect', 'iframe_removal')
@@ -498,12 +600,11 @@ def process():
         }
     else:
         prompt = request.form.get('prompt', '').strip()
-        api_key = request.form.get('api_key', '').strip()
 
         if not prompt:
             return jsonify({'error': 'Please enter a description of the effect.'}), 400
         if not api_key:
-            return jsonify({'error': 'OpenAI API key is required for AI mode.'}), 400
+            return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
         video_metadata = get_video_metadata(input_path)
         params = parse_prompt_with_ai(prompt, api_key, video_metadata)
@@ -512,15 +613,56 @@ def process():
 
     # Run mosh processing synchronously so client UI has immediate access to output
     result = run_mosh(input_path, output_path, params, job_id)
+    # Remove uploaded source video immediately to avoid retaining user media.
+    safe_remove(input_path)
 
     if result.get('success'):
-        return jsonify({
+        response = {
             'success': True,
             'job_id': job_id,
             'params': params,
             'explanation': params.get('explanation', ''),
             'download_url': f'/api/download/{job_id}'
-        })
+        }
+        fallback_influence = (
+            "I watched the clip and felt motion, fragmentation, and unresolved momentum."
+        )
+        fallback_narrative = (
+            "I dreamed I was walking through your video as if it were a corridor of repeating light. "
+            "Every cut felt like a memory trying to become a feeling, and the glitches moved like emotion without language. "
+            "What part of this dream felt most familiar to you?"
+        )
+        response['dream'] = {
+            'video_influence': fallback_influence,
+            'initial_narrative': fallback_narrative,
+            'suggested_image_prompt': fallback_narrative
+        }
+
+        if api_key:
+            video_influence = describe_video_content(input_path, api_key, job_id)
+            video_influences[job_id] = video_influence
+
+            conversation_histories[job_id] = [
+                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+                {"role": "system", "content": f"Video influence context: {video_influence}"}
+            ]
+
+            initial_seed = build_initial_dream_prompt(
+                request.form.get('prompt', '').strip() if not use_manual else ''
+            )
+            initial_narrative, conversation_histories[job_id] = get_narrative_response(
+                initial_seed, conversation_histories[job_id], api_key
+            )
+
+            response['dream'] = {
+                'video_influence': video_influence,
+                'initial_narrative': initial_narrative,
+                'suggested_image_prompt': narrative_to_image_prompt(job_id, fallback_prompt=video_influence)
+            }
+
+        # Retention fallback: if user never clicks download, remove processed video after 15 minutes.
+        schedule_delete(output_path, delay_seconds=900)
+        return jsonify(response)
 
     return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
 
@@ -545,7 +687,10 @@ def download(job_id):
     job_id = ''.join(c for c in job_id if c.isalnum() or c == '-')
     output_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_moshed.mp4')
     if os.path.exists(output_path):
-        return send_file(output_path, as_attachment=True, download_name='moshed.mp4')
+        response = send_file(output_path, as_attachment=True, download_name='moshed.mp4')
+        # Delete processed output after serving download to minimize retained media.
+        response.call_on_close(lambda: safe_remove(output_path))
+        return response
     return jsonify({'error': 'File not found'}), 404
 
 
@@ -555,19 +700,23 @@ def narrative():
     data = request.get_json()
     job_id = data.get('job_id', str(uuid.uuid4())[:8])
     user_input = data.get('message', '').strip()
-    api_key = data.get('api_key', '').strip()
+    api_key = get_server_api_key()
     use_history = data.get('use_history', True)
 
     if not user_input:
-        return jsonify({'error': 'Please provide a message.'}), 400
+        user_input = "Continue the dream."
     if not api_key:
-        return jsonify({'error': 'API key is required.'}), 400
+        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
     # Initialize or retrieve conversation history
     if job_id not in conversation_histories or not use_history:
         conversation_histories[job_id] = [
             {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT}
         ]
+        if video_influences.get(job_id):
+            conversation_histories[job_id].append(
+                {"role": "system", "content": f"Video influence context: {video_influences[job_id]}"}
+            )
 
     narrative_response, conversation_histories[job_id] = get_narrative_response(
         user_input, conversation_histories[job_id], api_key
@@ -576,7 +725,8 @@ def narrative():
     return jsonify({
         'success': True,
         'job_id': job_id,
-        'narrative': narrative_response
+        'narrative': narrative_response,
+        'suggested_image_prompt': narrative_to_image_prompt(job_id)
     })
 
 
@@ -586,15 +736,20 @@ def generate_image_endpoint():
     data = request.get_json()
     job_id = data.get('job_id', '').strip()
     prompt = data.get('prompt', '').strip()
-    api_key = data.get('api_key', '').strip()
+    api_key = get_server_api_key()
 
+    if not prompt:
+        prompt = narrative_to_image_prompt(job_id, fallback_prompt=video_influences.get(job_id, ''))
     if not prompt:
         return jsonify({'error': 'Please provide a prompt for image generation.'}), 400
     if not api_key:
-        return jsonify({'error': 'API key is required.'}), 400
+        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
     # Enhance the prompt for better image generation
-    enhanced_prompt = f"A surreal, dreamlike, artistic visualization of: {prompt}"
+    enhanced_prompt = (
+        "Create a cinematic surreal dream image with symbolic details, rich atmosphere, and painterly light. "
+        f"Dream narrative: {prompt}"
+    )
     image_url = generate_image(enhanced_prompt, api_key)
 
     if "Error" in image_url:
@@ -612,6 +767,8 @@ def clear_history(job_id):
     """Clear conversation history for a job."""
     if job_id in conversation_histories:
         del conversation_histories[job_id]
+    if job_id in video_influences:
+        del video_influences[job_id]
     return jsonify({'success': True})
 
 
@@ -630,7 +787,13 @@ def ping():
     except Exception:
         ffmpeg_ok = False
 
-    return jsonify({'ok': True, 'ffmpeg': ffmpeg_ok, 'ffmpeg_path': ffmpeg_path, 'hint': user_ffmpeg_install_hint()})
+    return jsonify({
+        'ok': True,
+        'ffmpeg': ffmpeg_ok,
+        'ffmpeg_path': ffmpeg_path,
+        'hint': user_ffmpeg_install_hint(),
+        'openai_configured': bool(get_server_api_key())
+    })
 
 
 @app.errorhandler(413)
