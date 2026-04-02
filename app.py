@@ -168,7 +168,8 @@ def generate_image(prompt: str, api_key: str) -> str:
             model="dall-e-3",
             prompt=prompt,
             size="1024x1024",
-            quality="standard",
+            quality="hd",
+            style="natural",
             n=1
         )
         return response.data[0].url
@@ -618,8 +619,6 @@ def process():
 
     # Run mosh processing synchronously so client UI has immediate access to output
     result = run_mosh(input_path, output_path, params, job_id)
-    # Remove uploaded source video immediately to avoid retaining user media.
-    safe_remove(input_path)
 
     if result.get('success'):
         response = {
@@ -665,10 +664,13 @@ def process():
                 'suggested_image_prompt': narrative_to_image_prompt(job_id, fallback_prompt=video_influence)
             }
 
+        # Remove uploaded source video after narrative/video-frame analysis is complete.
+        safe_remove(input_path)
         # Retention fallback: if user never clicks download, remove processed video after 15 minutes.
         schedule_delete(output_path, delay_seconds=900)
         return jsonify(response)
 
+    safe_remove(input_path)
     return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
 
 
@@ -750,10 +752,15 @@ def generate_image_endpoint():
     if not api_key:
         return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
-    # Enhance the prompt for better image generation
+    # Enhance the prompt for photorealistic generation anchored to video-frame context.
+    frame_context = video_influences.get(job_id, '').strip()
     enhanced_prompt = (
-        "Create a cinematic surreal dream image with symbolic details, rich atmosphere, and painterly light. "
-        f"Dream narrative: {prompt}"
+        "Create a photorealistic cinematic still that looks like a real photograph from a live-action scene. "
+        "Prioritize realism: natural skin texture, plausible lighting, true-to-life materials, and camera-consistent depth of field. "
+        "Do not render as painting, illustration, CGI, anime, or abstract art. "
+        "If surreal elements are present, depict them with physically believable detail as if captured by a real camera. "
+        f"Dream narrative direction: {prompt} "
+        f"Video frame cues to ground composition, setting, and mood: {frame_context or 'Use realistic visual continuity with the uploaded video.'}"
     )
     image_url = generate_image(enhanced_prompt, api_key)
 

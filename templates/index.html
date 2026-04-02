@@ -27,8 +27,16 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
-            z-index: -3;
+            z-index: 0;
             filter: brightness(20%) contrast(115%) saturate(92%);
+        }
+
+        #videoOverlay {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+            background: rgba(3, 3, 6, 0.55);
         }
 
         @keyframes glitch {
@@ -87,8 +95,8 @@
     </style>
 </head>
 
-<body class="bg-zinc-950 text-zinc-100 min-h-screen">
-    <div class="max-w-3xl mx-auto px-4 py-14">
+<body class="text-zinc-100 min-h-screen">
+    <div class="max-w-3xl mx-auto px-4 py-14 relative z-10">
 
         <div id="loadWarning"
             class="hidden mb-4 rounded-lg border border-orange-400 bg-orange-950/20 p-3 text-orange-300">
@@ -259,7 +267,7 @@
             <div id="imageSection" class="hidden">
                 <h2 class="text-sm font-semibold text-zinc-400 mb-3 uppercase tracking-wider">Dream Image Finale</h2>
                 <div class="space-y-3">
-                    <textarea id="imagePrompt" rows="2"
+                    <textarea id="imagePrompt" rows="4"
                         placeholder="Final dream image prompt (auto-filled from the narrative)..."
                         class="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"></textarea>
                     <button onclick="generateDreamImage()"
@@ -270,7 +278,7 @@
                 </div>
                 <div id="generatedImage" class="mt-4 hidden">
                     <img id="dreamImage" src="" alt="Generated dream image"
-                        class="w-full rounded-lg border border-zinc-700">
+                        class="w-full min-h-[420px] rounded-lg border border-zinc-700 bg-zinc-900 object-contain">
                     <a id="downloadImageLink" href="" target="_blank">
                         <button class="w-full mt-2 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-sm">Download
                             Image</button>
@@ -291,6 +299,7 @@
     <video autoplay muted loop id="videoBackground">
         <source src="{{ url_for('serve_video', filename='BlackBoxBG.mp4') }}" type="video/mp4">
     </video>
+    <div id="videoOverlay"></div>
 
     <script>
         // Force any stale localhost fetch target to 127.0.0.1 to avoid cross-origin/CORS issues.
