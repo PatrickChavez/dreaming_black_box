@@ -168,15 +168,124 @@ def generate_image(prompt: str, api_key: str) -> str:
         response = client.images.generate(
             model="dall-e-3",
             prompt=prompt,
-            temperature=1.9,
             size="1024x1024",
             quality="hd",
             style="natural",
             n=1
         )
-        return response.data[0].url
+        image_url = response.data[0].url if getattr(response, "data", None) else None
+        if not image_url:
+            return "Error generating image: API returned no image URL."
+        return image_url
+    except TypeError as e:
+        # Common when local SDK version doesn't support provided parameters.
+        return (
+            "Error generating image: OpenAI SDK/images parameter mismatch. "
+            f"{str(e)}. Try updating the OpenAI package and restart the server."
+        )
     except Exception as e:
         return f"Error generating image: {str(e)}"
+
+
+def infer_movement_matrix(prompt: str, api_key: str, grid_size: int = 8) -> dict:
+    """
+    Infer a motion-vector matrix from text describing the generated image scene.
+    Note: this is an AI-estimated motion field, not true optical flow from video frames.
+    """
+    try:
+        grid_size = max(2, min(16, int(grid_size)))
+    except Exception:
+        grid_size = 8
+
+    fallback_vectors = [
+        [{"dx": 0.0, "dy": 0.0, "magnitude": 0.0} for _ in range(grid_size)]
+        for _ in range(grid_size)
+    ]
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Return only valid JSON. "
+                        "Infer a plausible 2D motion field for a still image prompt. "
+                        "Use a grid of vectors where each vector has dx, dy in range [-1, 1] "
+                        "and magnitude in range [0, 1]. "
+                        "Prefer smooth, coherent motion patterns. "
+                        "Required JSON shape: "
+                        "{"
+                        "\"basis\":\"estimated_from_prompt\","
+                        "\"grid_size\":integer,"
+                        "\"vectors\":[[{\"dx\":number,\"dy\":number,\"magnitude\":number}]],"
+                        "\"summary\":\"short sentence\""
+                        "}"
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Prompt: {prompt}\n"
+                        f"grid_size: {grid_size}\n"
+                        "Create the movement matrix now."
+                    )
+                }
+            ],
+            temperature=0.3,
+            max_tokens=1200
+        )
+        content = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(content)
+
+        vectors = parsed.get("vectors")
+        if not isinstance(vectors, list) or len(vectors) != grid_size:
+            vectors = fallback_vectors
+
+        normalized_vectors = []
+        for row in vectors[:grid_size]:
+            if not isinstance(row, list):
+                row = []
+            norm_row = []
+            for vector in row[:grid_size]:
+                if not isinstance(vector, dict):
+                    vector = {}
+                dx = float(vector.get("dx", 0.0))
+                dy = float(vector.get("dy", 0.0))
+                mag = float(vector.get("magnitude", 0.0))
+                norm_row.append({
+                    "dx": max(-1.0, min(1.0, dx)),
+                    "dy": max(-1.0, min(1.0, dy)),
+                    "magnitude": max(0.0, min(1.0, mag))
+                })
+            while len(norm_row) < grid_size:
+                norm_row.append({"dx": 0.0, "dy": 0.0, "magnitude": 0.0})
+            normalized_vectors.append(norm_row)
+
+        while len(normalized_vectors) < grid_size:
+            normalized_vectors.append(
+                [{"dx": 0.0, "dy": 0.0, "magnitude": 0.0} for _ in range(grid_size)]
+            )
+
+        summary = str(parsed.get("summary", "Estimated motion field from the prompt context.")).strip()
+        if not summary:
+            summary = "Estimated motion field from the prompt context."
+
+        return {
+            "basis": "estimated_from_prompt",
+            "grid_size": grid_size,
+            "vectors": normalized_vectors,
+            "summary": summary
+        }
+    except Exception:
+        return {
+            "basis": "estimated_from_prompt",
+            "grid_size": grid_size,
+            "vectors": fallback_vectors,
+            "summary": "No reliable motion estimate was produced; returning a zero matrix."
+        }
 
 
 def extract_video_frames(video_path: str, job_id: str, max_frames: int = 4) -> list[str]:
@@ -249,6 +358,51 @@ def describe_video_content(video_path: str, api_key: str, job_id: str) -> str:
                 pass
 
 
+def describe_image_content(image_path: str, api_key: str) -> str:
+    """Summarize visual and symbolic motifs in an uploaded image."""
+    try:
+        client = OpenAI(api_key=api_key)
+        with open(image_path, 'rb') as image_file:
+            encoded = base64.b64encode(image_file.read()).decode('utf-8')
+
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    "This is a still image provided by the user. "
+                    "Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences."
+                )
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}
+            }
+        ]
+
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.5,
+            max_tokens=220
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return f"I only caught fragments from the image memory: {e}"
+
+
+def detect_media_type(upload) -> str:
+    """Classify upload as video or image based on mimetype/extension."""
+    mimetype = (getattr(upload, 'mimetype', '') or '').lower()
+    filename = (getattr(upload, 'filename', '') or '').lower()
+    ext = os.path.splitext(filename)[1]
+
+    if mimetype.startswith('video/') or ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}:
+        return 'video'
+    if mimetype.startswith('image/') or ext in {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}:
+        return 'image'
+    return 'unknown'
+
+
 def build_initial_dream_prompt(seed: str = '') -> str:
     base = "Describe your dream inspired by what you just watched."
     if seed:
@@ -258,8 +412,26 @@ def build_initial_dream_prompt(seed: str = '') -> str:
 
 def narrative_to_image_prompt(job_id: str, fallback_prompt: str = '') -> str:
     history = conversation_histories.get(job_id, [])
-    assistant_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'assistant'][-4:]
-    summary = ' '.join(chunk.strip() for chunk in assistant_chunks if chunk).strip()
+    assistant_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'assistant'][-3:]
+    user_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'user'][-2:]
+
+    # Ensure the latest user continuation visibly steers image generation.
+    latest_user = ''
+    for chunk in reversed(user_chunks):
+        text = (chunk or '').strip()
+        if text:
+            latest_user = text
+            break
+
+    parts = []
+    if latest_user:
+        parts.append(f"User direction to visualize: {latest_user}")
+
+    assistant_summary = ' '.join(chunk.strip() for chunk in assistant_chunks if chunk).strip()
+    if assistant_summary:
+        parts.append(f"Dream narrative cues: {assistant_summary}")
+
+    summary = ' '.join(parts).strip()
     if summary:
         return summary
     return fallback_prompt or "A surreal dreamscape shaped by fragmented video memories."
@@ -582,98 +754,120 @@ def serve_video(filename):
 
 @app.route('/api/process', methods=['POST'])
 def process():
-    if 'video' not in request.files or request.files['video'].filename == '':
-        return jsonify({'error': 'No video file provided'}), 400
+    upload = request.files.get('video') or request.files.get('media') or request.files.get('image')
+    if not upload or upload.filename == '':
+        return jsonify({'error': 'No media file provided'}), 400
 
-    video = request.files['video']
+    media_type = detect_media_type(upload)
+    if media_type == 'unknown':
+        return jsonify({'error': 'Unsupported file type. Please upload a video or image.'}), 400
+
     job_id = str(uuid.uuid4())[:8]
 
-    ext = os.path.splitext(video.filename)[1] or '.mp4'
+    default_ext = '.mp4' if media_type == 'video' else '.jpg'
+    ext = os.path.splitext(upload.filename)[1] or default_ext
     input_path = os.path.join(UPLOAD_FOLDER, f'{job_id}_input{ext}')
     output_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_moshed.mp4')
-    video.save(input_path)
+    upload.save(input_path)
 
     use_manual = request.form.get('use_manual') == 'true'
     api_key = get_server_api_key()
 
-    if use_manual:
-        effect = request.form.get('effect', 'iframe_removal')
-        params = {
-            'effect': effect,
-            'start_frame': int(request.form.get('start_frame', 0)),
-            'end_frame': int(request.form.get('end_frame', -1)),
-            'fps': int(request.form.get('fps', 30)),
-            'delta': int(request.form.get('delta', 5)),
-            'explanation': ''
-        }
-    else:
-        prompt = request.form.get('prompt', '').strip()
+    prompt = request.form.get('prompt', '').strip()
+    params = {}
 
-        if not prompt:
-            return jsonify({'error': 'Please enter a description of the effect.'}), 400
-        if not api_key:
-            return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
-
-        video_metadata = get_video_metadata(input_path)
-        params = parse_prompt_with_ai(prompt, api_key, video_metadata)
-        if 'error' in params:
-            return jsonify({'error': f'AI error: {params["error"]}'}), 400
-
-    # Run mosh processing synchronously so client UI has immediate access to output
-    result = run_mosh(input_path, output_path, params, job_id)
-
-    if result.get('success'):
-        response = {
-            'success': True,
-            'job_id': job_id,
-            'params': params,
-            'explanation': params.get('explanation', ''),
-            'download_url': f'/api/download/{job_id}'
-        }
-        fallback_influence = (
-            "I watched the clip and felt motion, fragmentation, and unresolved momentum."
-        )
-        fallback_narrative = (
-            "I dreamed I was walking through your video as if it were a corridor of repeating light. "
-            "Every cut felt like a memory trying to become a feeling, and the glitches moved like emotion without language. "
-            "What part of this dream felt most familiar to you?"
-        )
-        response['dream'] = {
-            'video_influence': fallback_influence,
-            'initial_narrative': fallback_narrative,
-            'suggested_image_prompt': fallback_narrative
-        }
-
-        if api_key:
-            video_influence = describe_video_content(input_path, api_key, job_id)
-            video_influences[job_id] = video_influence
-
-            conversation_histories[job_id] = [
-                {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
-                {"role": "system", "content": f"Video influence context: {video_influence}"}
-            ]
-
-            initial_seed = build_initial_dream_prompt(
-                request.form.get('prompt', '').strip() if not use_manual else ''
-            )
-            initial_narrative, conversation_histories[job_id] = get_narrative_response(
-                initial_seed, conversation_histories[job_id], api_key
-            )
-
-            response['dream'] = {
-                'video_influence': video_influence,
-                'initial_narrative': initial_narrative,
-                'suggested_image_prompt': narrative_to_image_prompt(job_id, fallback_prompt=video_influence)
+    if media_type == 'video':
+        if use_manual:
+            effect = request.form.get('effect', 'iframe_removal')
+            params = {
+                'effect': effect,
+                'start_frame': int(request.form.get('start_frame', 0)),
+                'end_frame': int(request.form.get('end_frame', -1)),
+                'fps': int(request.form.get('fps', 30)),
+                'delta': int(request.form.get('delta', 5)),
+                'explanation': ''
             }
+        else:
+            if not prompt:
+                safe_remove(input_path)
+                return jsonify({'error': 'Please enter a description of the effect.'}), 400
+            if not api_key:
+                safe_remove(input_path)
+                return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
-        # Remove uploaded source video after narrative/video-frame analysis is complete.
-        safe_remove(input_path)
-        # Retention fallback: if user never clicks download, remove processed video after 15 minutes.
-        schedule_delete(output_path, delay_seconds=900)
-        return jsonify(response)
+            video_metadata = get_video_metadata(input_path)
+            params = parse_prompt_with_ai(prompt, api_key, video_metadata)
+            if 'error' in params:
+                safe_remove(input_path)
+                return jsonify({'error': f'AI error: {params["error"]}'}), 400
 
+        # Run mosh processing synchronously so client UI has immediate access to output
+        result = run_mosh(input_path, output_path, params, job_id)
+        if not result.get('success'):
+            safe_remove(input_path)
+            return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
+
+    response = {
+        'success': True,
+        'job_id': job_id,
+        'media_type': media_type,
+        'params': params,
+        'explanation': params.get('explanation', '') if media_type == 'video' else ''
+    }
+    if media_type == 'video':
+        response['download_url'] = f'/api/download/{job_id}'
+
+    fallback_influence = (
+        "I watched the clip and felt motion, fragmentation, and unresolved momentum."
+        if media_type == 'video'
+        else "I studied the image and felt stillness charged with symbolic tension."
+    )
+    fallback_narrative = (
+        "I dreamed I was walking through your video as if it were a corridor of repeating light. "
+        "Every cut felt like a memory trying to become a feeling, and the glitches moved like emotion without language. "
+        "What part of this dream felt most familiar to you?"
+        if media_type == 'video'
+        else
+        "I dreamed I stepped into your image and found it breathing in quiet cycles. "
+        "Its details felt like clues from a memory that wanted to be understood. "
+        "What part of this still moment feels most alive to you?"
+    )
+    response['dream'] = {
+        'video_influence': fallback_influence,
+        'initial_narrative': fallback_narrative,
+        'suggested_image_prompt': fallback_narrative
+    }
+
+    if api_key:
+        media_influence = (
+            describe_video_content(input_path, api_key, job_id)
+            if media_type == 'video'
+            else describe_image_content(input_path, api_key)
+        )
+        video_influences[job_id] = media_influence
+
+        conversation_histories[job_id] = [
+            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+            {"role": "system", "content": f"Video influence context: {media_influence}"}
+        ]
+
+        initial_seed = build_initial_dream_prompt(prompt if not use_manual else '')
+        initial_narrative, conversation_histories[job_id] = get_narrative_response(
+            initial_seed, conversation_histories[job_id], api_key
+        )
+
+        response['dream'] = {
+            'video_influence': media_influence,
+            'initial_narrative': initial_narrative,
+            'suggested_image_prompt': narrative_to_image_prompt(job_id, fallback_prompt=media_influence)
+        }
+
+    # Remove uploaded source media after analysis is complete.
     safe_remove(input_path)
-    return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
+    # Retention fallback: if user never clicks download, remove processed video after 15 minutes.
+    if media_type == 'video':
+        schedule_delete(output_path, delay_seconds=900)
+    return jsonify(response)
 
 
 @app.route('/api/status/<job_id>')
@@ -741,10 +935,11 @@ def narrative():
 
 @app.route('/api/generate-image', methods=['POST'])
 def generate_image_endpoint():
-    """Generate an image based on the narrative/dream description."""
+    """Generate an image and an estimated movement matrix from the same prompt."""
     data = request.get_json()
     job_id = data.get('job_id', '').strip()
     prompt = data.get('prompt', '').strip()
+    matrix_size = data.get('matrix_size', 8)
     api_key = get_server_api_key()
 
     if not prompt:
@@ -765,6 +960,7 @@ def generate_image_endpoint():
         f"Video frame cues to ground composition, setting, and mood: {frame_context or 'Use realistic visual continuity with the uploaded video.'}"
     )
     image_url = generate_image(enhanced_prompt, api_key)
+    movement_matrix = infer_movement_matrix(enhanced_prompt, api_key, grid_size=matrix_size)
 
     if "Error" in image_url:
         return jsonify({'error': image_url}), 500
@@ -772,7 +968,8 @@ def generate_image_endpoint():
     return jsonify({
         'success': True,
         'image_url': image_url,
-        'prompt': prompt
+        'prompt': prompt,
+        'movement_matrix': movement_matrix
     })
 
 
