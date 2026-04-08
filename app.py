@@ -87,15 +87,30 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # One setting to tune overall behavior.
-# Options: "stable", "balanced", "chaotic"
+# Options: "stable", "balanced", "chaotic", "nuclear"
 STYLE_PRESETS = {
-    'stable': {'temperature': 0.3, 'output_crf': 18, 'delta_boost': 1.0},
-    'balanced': {'temperature': 0.8, 'output_crf': 21, 'delta_boost': 1.2},
-    'chaotic': {'temperature': 2.0, 'output_crf': 30, 'delta_boost': 1.7}
+    'stable': {'temperature': 0.3, 'output_crf': 18, 'delta_boost': 1.0, 'default_delta': 6},
+    'balanced': {'temperature': 0.8, 'output_crf': 21, 'delta_boost': 1.2, 'default_delta': 8},
+    'chaotic': {
+        'temperature': 2.0,
+        'output_crf': 40,
+        'delta_boost': 3.0,
+        'default_delta': 12,
+        'force_delta_repeat': True,
+        'drop_iframes_in_delta': True
+    },
+    'nuclear': {
+        'temperature': 2.0,
+        'output_crf': 48,
+        'delta_boost': 4.0,
+        'default_delta': 16,
+        'force_delta_repeat': True,
+        'drop_iframes_in_delta': True
+    }
 }
-STYLE_PRESET = os.getenv('MOSH_STYLE_PRESET', 'chaotic').strip().lower()
+STYLE_PRESET = os.getenv('MOSH_STYLE_PRESET', 'nuclear').strip().lower()
 if STYLE_PRESET not in STYLE_PRESETS:
-    STYLE_PRESET = 'chaotic'
+    STYLE_PRESET = 'nuclear'
 
 # In-memory conversation history storage (job_id -> conversation)
 conversation_histories = {}
@@ -579,12 +594,15 @@ def get_video_metadata(input_path: str) -> dict:
 
 
 def normalize_ai_params(params: dict, video_metadata: dict) -> dict:
+    style = STYLE_PRESETS[STYLE_PRESET]
     total_frames = max(1, int(video_metadata.get('total_frames', 300)))
     source_fps = float(video_metadata.get('fps', 30))
 
     effect = params.get('effect', 'iframe_removal')
     if effect not in {'iframe_removal', 'delta_repeat'}:
         effect = 'iframe_removal'
+    if style.get('force_delta_repeat'):
+        effect = 'delta_repeat'
 
     start_frame = max(0, int(params.get('start_frame', 0)))
     end_frame = int(params.get('end_frame', -1))
@@ -598,7 +616,7 @@ def normalize_ai_params(params: dict, video_metadata: dict) -> dict:
     fps = int(round(float(params.get('fps', source_fps or 30))))
     fps = max(1, min(120, fps))
 
-    delta = int(params.get('delta', 8))
+    delta = int(params.get('delta', style.get('default_delta', 8)))
     delta = max(1, min(delta, 30))
 
     return {
@@ -677,8 +695,8 @@ def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> di
     start_frame = int(params.get('start_frame', 0))
     end_frame = int(params.get('end_frame', -1))
     fps = max(1, min(120, int(params.get('fps', 30))))
-    delta = int(params.get('delta', 8)) if effect == 'delta_repeat' else 0
     style = STYLE_PRESETS[STYLE_PRESET]
+    delta = int(params.get('delta', style.get('default_delta', 8))) if effect == 'delta_repeat' else 0
     boosted_delta = delta
     if delta > 0:
         boosted_delta = int(round(delta * float(style.get('delta_boost', 1.0))))
@@ -740,6 +758,12 @@ def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> di
 
                     if not is_video or not in_range:
                         out.write(frame_marker + frame)
+                        continue
+                    if (
+                        style.get('drop_iframes_in_delta')
+                        and len(frame) > 8
+                        and frame[5:8] == iframe_sig
+                    ):
                         continue
 
                     if len(repeat_frames) < boosted_delta and frame[5:8] != iframe_sig:
