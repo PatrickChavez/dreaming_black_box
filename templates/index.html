@@ -272,7 +272,13 @@
                     <input type="text" id="narrativeInput" placeholder="Continue the narrative..."
                         class="flex-1 bg-zinc-800 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
                         onkeypress="if(event.key==='Enter') continueNarrative()">
-                    <button onclick="continueNarrative()"
+                    <input type="file" id="narrativeMediaInput" accept="video/*,image/*" class="hidden"
+                        onchange="handleNarrativeMediaSelect(this.files[0])">
+                    <button type="button" onclick="document.getElementById('narrativeMediaInput').click()"
+                        class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-sm font-medium transition-colors text-zinc-300">
+                        Attach Media
+                    </button>
+                    <button id="narrativeContinueBtn" onclick="continueNarrative()"
                         class="px-4 py-2 bg-pink-600 hover:bg-pink-500 rounded text-sm font-medium transition-colors">
                         Continue
                     </button>
@@ -281,6 +287,7 @@
                         Reset
                     </button>
                 </div>
+                <p id="narrativeMediaStatus" class="mt-2 text-xs text-zinc-500"></p>
             </div>
 
             <!-- Image Generation Section -->
@@ -348,6 +355,7 @@
         let currentMode = 'ai';
         let selectedFile = null;
         let currentJobId = null;
+        let selectedNarrativeMedia = null;
         let movementAnimFrame = null;
         let imageAnimFrame = null;
         const DEFAULT_API_BASE = 'http://127.0.0.1:5000';
@@ -505,6 +513,17 @@
             }
         }
 
+        function handleNarrativeMediaSelect(file) {
+            selectedNarrativeMedia = file || null;
+            const status = document.getElementById('narrativeMediaStatus');
+            if (!status) return;
+            if (selectedNarrativeMedia) {
+                status.textContent = `Attached: ${selectedNarrativeMedia.name}`;
+            } else {
+                status.textContent = '';
+            }
+        }
+
         async function processVideo() {
             if (!selectedFile) { showError('Please select a video file first.'); return; }
 
@@ -631,23 +650,37 @@
 
         async function continueNarrative() {
             const input = document.getElementById('narrativeInput').value.trim();
-            if (!input) return;
+            const hasMedia = !!selectedNarrativeMedia;
+            if (!input && !hasMedia) return;
 
             const useHistory = document.getElementById('useHistory').checked;
-            const btn = document.querySelector('#narrativeSection button');
+            const btn = document.getElementById('narrativeContinueBtn');
             btn.disabled = true;
             btn.innerHTML = '<span class="spinner"></span>';
 
             try {
-                const res = await fetchWithFallback('/api/narrative', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        job_id: currentJobId,
-                        message: input,
-                        use_history: useHistory
-                    })
-                });
+                let res;
+                if (hasMedia) {
+                    const fd = new FormData();
+                    fd.append('job_id', currentJobId || '');
+                    fd.append('message', input);
+                    fd.append('use_history', String(useHistory));
+                    fd.append('media', selectedNarrativeMedia);
+                    res = await fetchWithFallback('/api/narrative-media', {
+                        method: 'POST',
+                        body: fd
+                    });
+                } else {
+                    res = await fetchWithFallback('/api/narrative', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            job_id: currentJobId,
+                            message: input,
+                            use_history: useHistory
+                        })
+                    });
+                }
                 const data = await res.json();
                 if (data.success) {
                     typewriterDisplay(data.narrative);
@@ -655,6 +688,11 @@
                     if (data.suggested_image_prompt) {
                         document.getElementById('imagePrompt').value = data.suggested_image_prompt;
                     }
+                    selectedNarrativeMedia = null;
+                    const mediaInput = document.getElementById('narrativeMediaInput');
+                    if (mediaInput) mediaInput.value = '';
+                    const mediaStatus = document.getElementById('narrativeMediaStatus');
+                    if (mediaStatus) mediaStatus.textContent = '';
                     hideError();
                 } else {
                     showError(data.error || 'Failed to generate narrative.');
@@ -691,6 +729,10 @@
                     document.getElementById('downloadImageLink').href = data.image_url;
                     document.getElementById('generatedImage').classList.remove('hidden');
                     startMovementPreview(data.image_url, data.movement_matrix);
+                    const matrixStatus = document.getElementById('matrixStatus');
+                    if (matrixStatus && data.datamosh_applied === false) {
+                        matrixStatus.textContent = 'Datamosh post-process fallback: showing original generated image.';
+                    }
                     hideError();
                 } else {
                     showError(data.error || 'Failed to generate image.');

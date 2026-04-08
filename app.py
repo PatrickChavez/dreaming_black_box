@@ -10,6 +10,7 @@ import subprocess
 import socket
 import base64
 import time
+import urllib.request
 from flask import Flask, request, jsonify, render_template, send_file, send_from_directory, Response
 from flask_cors import CORS
 from openai import OpenAI
@@ -185,6 +186,75 @@ def generate_image(prompt: str, api_key: str) -> str:
         )
     except Exception as e:
         return f"Error generating image: {str(e)}"
+
+
+def datamosh_generated_image(image_url: str, job_id: str) -> tuple[bool, str]:
+    """
+    Apply a datamosh-style post-process to a generated still image.
+    Returns (success, resulting_url).
+    """
+    input_image_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_input.png')
+    source_video_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_source.mp4')
+    moshed_video_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_moshed.mp4')
+    output_image_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_datamoshed.jpg')
+
+    try:
+        with urllib.request.urlopen(image_url, timeout=30) as resp:
+            image_bytes = resp.read()
+        with open(input_image_path, 'wb') as f:
+            f.write(image_bytes)
+
+        # Create a short moving clip from the still so delta frames exist to mosh.
+        ret = subprocess.call([
+            ffmpeg_cmd(), '-loglevel', 'error', '-y',
+            '-loop', '1',
+            '-i', input_image_path,
+            '-t', '3',
+            '-vf', (
+                "scale=1024:1024:force_original_aspect_ratio=decrease,"
+                "pad=1024:1024:(ow-iw)/2:(oh-ih)/2,"
+                "zoompan=z='min(zoom+0.002,1.14)':"
+                "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:s=1024x1024,"
+                "fps=30,format=yuv420p"
+            ),
+            '-r', '30',
+            '-pix_fmt', 'yuv420p',
+            '-an',
+            source_video_path
+        ])
+        if ret != 0 or not os.path.exists(source_video_path):
+            return False, image_url
+
+        mosh_params = {
+            'effect': 'delta_repeat',
+            'start_frame': 8,
+            'end_frame': 82,
+            'fps': 30,
+            'delta': 8,
+            'explanation': 'Datamosh post-process on generated still image.'
+        }
+        mosh_result = run_mosh(source_video_path, moshed_video_path, mosh_params, f'{job_id}_imgfx')
+        if not mosh_result.get('success') or not os.path.exists(moshed_video_path):
+            return False, image_url
+
+        ret = subprocess.call([
+            ffmpeg_cmd(), '-loglevel', 'error', '-y',
+            '-ss', '1.2',
+            '-i', moshed_video_path,
+            '-frames:v', '1',
+            output_image_path
+        ])
+        if ret != 0 or not os.path.exists(output_image_path):
+            return False, image_url
+
+        schedule_delete(output_image_path, delay_seconds=900)
+        return True, f'/api/generated-image/{os.path.basename(output_image_path)}'
+    except Exception:
+        return False, image_url
+    finally:
+        safe_remove(input_image_path)
+        safe_remove(source_video_path)
+        safe_remove(moshed_video_path)
 
 
 def infer_movement_matrix(prompt: str, api_key: str, grid_size: int = 8) -> dict:
@@ -388,6 +458,15 @@ def describe_image_content(image_path: str, api_key: str) -> str:
         return completion.choices[0].message.content.strip()
     except Exception as e:
         return f"I only caught fragments from the image memory: {e}"
+
+
+def describe_media_content(media_path: str, media_type: str, api_key: str, job_id: str = '') -> str:
+    """Describe uploaded media (image/video) for narrative conditioning."""
+    if media_type == 'video':
+        return describe_video_content(media_path, api_key, job_id or str(uuid.uuid4())[:8])
+    if media_type == 'image':
+        return describe_image_content(media_path, api_key)
+    return "I sensed fragments from unfamiliar media."
 
 
 def detect_media_type(upload) -> str:
@@ -752,6 +831,17 @@ def serve_video(filename):
     return send_from_directory('videos', filename)
 
 
+@app.route('/api/generated-image/<path:filename>')
+def serve_generated_image(filename):
+    safe_name = ''.join(c for c in filename if c.isalnum() or c in {'-', '_', '.'})
+    if not safe_name:
+        return jsonify({'error': 'Invalid filename'}), 400
+    image_path = os.path.join(OUTPUT_FOLDER, safe_name)
+    if not os.path.exists(image_path):
+        return jsonify({'error': 'Image not found'}), 404
+    return send_from_directory(OUTPUT_FOLDER, safe_name)
+
+
 @app.route('/api/process', methods=['POST'])
 def process():
     upload = request.files.get('video') or request.files.get('media') or request.files.get('image')
@@ -933,6 +1023,68 @@ def narrative():
     })
 
 
+@app.route('/api/narrative-media', methods=['POST'])
+def narrative_media():
+    """Continue narrative using optional text plus an uploaded image/video reference."""
+    job_id = (request.form.get('job_id', str(uuid.uuid4())[:8]) or '').strip()
+    user_input = (request.form.get('message', '') or '').strip()
+    use_history = (request.form.get('use_history', 'true') or 'true').lower() == 'true'
+    upload = request.files.get('media') or request.files.get('video') or request.files.get('image')
+    api_key = get_server_api_key()
+
+    if not api_key:
+        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
+
+    media_context = ''
+    if upload and upload.filename:
+        media_type = detect_media_type(upload)
+        if media_type == 'unknown':
+            return jsonify({'error': 'Unsupported media type. Upload an image or video.'}), 400
+
+        ext = os.path.splitext(upload.filename)[1] or ('.mp4' if media_type == 'video' else '.jpg')
+        media_path = os.path.join(UPLOAD_FOLDER, f'{job_id}_narrative_ref{ext}')
+        upload.save(media_path)
+        try:
+            media_context = describe_media_content(media_path, media_type, api_key, job_id)
+        finally:
+            safe_remove(media_path)
+
+        if media_context:
+            media_label = 'video' if media_type == 'video' else 'image'
+            if user_input:
+                user_input = (
+                    f"{user_input}\n\n"
+                    f"Reference {media_label} context to weave in:\n{media_context}"
+                )
+            else:
+                user_input = f"Continue the dream using this {media_label} reference:\n{media_context}"
+
+    if not user_input:
+        user_input = "Continue the dream."
+
+    # Initialize or retrieve conversation history
+    if job_id not in conversation_histories or not use_history:
+        conversation_histories[job_id] = [
+            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT}
+        ]
+        if video_influences.get(job_id):
+            conversation_histories[job_id].append(
+                {"role": "system", "content": f"Video influence context: {video_influences[job_id]}"}
+            )
+
+    narrative_response, conversation_histories[job_id] = get_narrative_response(
+        user_input, conversation_histories[job_id], api_key
+    )
+
+    return jsonify({
+        'success': True,
+        'job_id': job_id,
+        'narrative': narrative_response,
+        'suggested_image_prompt': narrative_to_image_prompt(job_id),
+        'media_context': media_context
+    })
+
+
 @app.route('/api/generate-image', methods=['POST'])
 def generate_image_endpoint():
     """Generate an image and an estimated movement matrix from the same prompt."""
@@ -960,14 +1112,18 @@ def generate_image_endpoint():
         f"Video frame cues to ground composition, setting, and mood: {frame_context or 'Use realistic visual continuity with the uploaded video.'}"
     )
     image_url = generate_image(enhanced_prompt, api_key)
-    movement_matrix = infer_movement_matrix(enhanced_prompt, api_key, grid_size=matrix_size)
 
     if "Error" in image_url:
         return jsonify({'error': image_url}), 500
 
+    datamosh_ok, final_image_url = datamosh_generated_image(image_url, job_id or str(uuid.uuid4())[:8])
+    movement_matrix = infer_movement_matrix(enhanced_prompt, api_key, grid_size=matrix_size)
+
     return jsonify({
         'success': True,
-        'image_url': image_url,
+        'image_url': final_image_url,
+        'original_image_url': image_url,
+        'datamosh_applied': datamosh_ok,
         'prompt': prompt,
         'movement_matrix': movement_matrix
     })
