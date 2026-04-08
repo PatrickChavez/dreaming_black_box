@@ -78,12 +78,8 @@ def get_server_api_key() -> str:
 def is_port_in_use(host: str, port: int) -> bool:
     """Return True when a local TCP port is already bound by another process."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-            return False
-        except OSError:
-            return True
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
 
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = 'outputs'
@@ -1168,7 +1164,7 @@ def ping():
     return jsonify({
         'ok': True,
         'ffmpeg': ffmpeg_ok,
-        'ffmpeg_path': ffmpeg_path,
+        'ffmpeg_path': 'ffmpeg',
         'hint': user_ffmpeg_install_hint(),
         'openai_configured': bool(get_server_api_key())
     })
