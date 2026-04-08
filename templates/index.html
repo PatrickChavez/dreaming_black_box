@@ -96,7 +96,6 @@
         .moving-preview-wrap {
             position: relative;
             width: 100%;
-            min-height: 420px;
             border-radius: 0.5rem;
             overflow: hidden;
             background: #111114;
@@ -106,8 +105,12 @@
         #dreamImage,
         #dreamImageCanvas {
             width: 100%;
-            min-height: 420px;
+            height: auto;
             object-fit: contain;
+        }
+
+        #dreamImage:not(.hidden),
+        #dreamImageCanvas:not(.hidden) {
             display: block;
         }
     </style>
@@ -224,7 +227,7 @@
                     </div>
                     <div id="deltaField">
                         <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">Delta Frames</label>
-                        <input type="number" id="delta" value="5" min="1"
+                        <input type="number" id="delta" value="8" min="1"
                             class="w-full bg-zinc-800 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
                         <p class="text-xs text-zinc-600 mt-1">frames to loop</p>
                     </div>

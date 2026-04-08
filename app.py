@@ -89,13 +89,13 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 # One setting to tune overall behavior.
 # Options: "stable", "balanced", "chaotic"
 STYLE_PRESETS = {
-    'stable': {'temperature': 0.3, 'output_crf': 18},
-    'balanced': {'temperature': 0.8, 'output_crf': 21},
-    'chaotic': {'temperature': 1.3, 'output_crf': 25}
+    'stable': {'temperature': 0.3, 'output_crf': 18, 'delta_boost': 1.0},
+    'balanced': {'temperature': 0.8, 'output_crf': 21, 'delta_boost': 1.2},
+    'chaotic': {'temperature': 2.0, 'output_crf': 30, 'delta_boost': 1.7}
 }
-STYLE_PRESET = os.getenv('MOSH_STYLE_PRESET', 'balanced').strip().lower()
+STYLE_PRESET = os.getenv('MOSH_STYLE_PRESET', 'chaotic').strip().lower()
 if STYLE_PRESET not in STYLE_PRESETS:
-    STYLE_PRESET = 'balanced'
+    STYLE_PRESET = 'chaotic'
 
 # In-memory conversation history storage (job_id -> conversation)
 conversation_histories = {}
@@ -120,7 +120,7 @@ Parameters to return:
   "start_frame": integer (default 0),
   "end_frame": integer (-1 means until end of video, default -1),
   "fps": integer (prefer the source clip fps when provided, otherwise default 30, typical range 24-60),
-  "delta": integer (only for delta_repeat — number of frames to loop, default 5, best range 3-15),
+  "delta": integer (only for delta_repeat — number of frames to loop, default 8, best range 5-20),
   "explanation": "one sentence describing what will happen visually"
 }
 
@@ -598,7 +598,7 @@ def normalize_ai_params(params: dict, video_metadata: dict) -> dict:
     fps = int(round(float(params.get('fps', source_fps or 30))))
     fps = max(1, min(120, fps))
 
-    delta = int(params.get('delta', 5))
+    delta = int(params.get('delta', 8))
     delta = max(1, min(delta, 30))
 
     return {
@@ -677,8 +677,12 @@ def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> di
     start_frame = int(params.get('start_frame', 0))
     end_frame = int(params.get('end_frame', -1))
     fps = max(1, min(120, int(params.get('fps', 30))))
-    delta = int(params.get('delta', 5)) if effect == 'delta_repeat' else 0
+    delta = int(params.get('delta', 8)) if effect == 'delta_repeat' else 0
     style = STYLE_PRESETS[STYLE_PRESET]
+    boosted_delta = delta
+    if delta > 0:
+        boosted_delta = int(round(delta * float(style.get('delta_boost', 1.0))))
+        boosted_delta = max(1, min(boosted_delta, 30))
 
     input_avi = f'tmp_{job_id}_in.avi'
     output_avi = f'tmp_{job_id}_out.avi'
@@ -718,12 +722,12 @@ def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> di
         with open(output_avi, 'wb') as out:
             out.write(header)
 
-            if delta > 0:
+            if boosted_delta > 0:
                 # Delta repeat: capture N p-frames then loop them
-                if delta > max(1, end_frame - start_frame):
+                if boosted_delta > max(1, end_frame - start_frame):
                     return {
                         'success': False,
-                        'error': f'Delta ({delta}) is larger than the frame range ({end_frame - start_frame}). '
+                        'error': f'Delta ({boosted_delta}) is larger than the frame range ({end_frame - start_frame}). '
                                  f'Try a smaller delta or a wider frame range.'
                     }
 
@@ -738,12 +742,12 @@ def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> di
                         out.write(frame_marker + frame)
                         continue
 
-                    if len(repeat_frames) < delta and frame[5:8] != iframe_sig:
+                    if len(repeat_frames) < boosted_delta and frame[5:8] != iframe_sig:
                         repeat_frames.append(frame)
                         out.write(frame_marker + frame)
-                    elif len(repeat_frames) == delta:
+                    elif len(repeat_frames) == boosted_delta:
                         out.write(frame_marker + repeat_frames[repeat_index])
-                        repeat_index = (repeat_index + 1) % delta
+                        repeat_index = (repeat_index + 1) % boosted_delta
                     else:
                         out.write(frame_marker + frame)
             else:
@@ -882,7 +886,7 @@ def process():
                 'start_frame': int(request.form.get('start_frame', 0)),
                 'end_frame': int(request.form.get('end_frame', -1)),
                 'fps': int(request.form.get('fps', 30)),
-                'delta': int(request.form.get('delta', 5)),
+                'delta': int(request.form.get('delta', 8)),
                 'explanation': ''
             }
         else:
