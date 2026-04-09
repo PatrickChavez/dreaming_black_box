@@ -309,26 +309,6 @@
     <div id="videoOverlay"></div>
 
     <script>
-        // Force any stale localhost fetch target to 127.0.0.1 to avoid cross-origin/CORS issues.
-        const _nativeFetch = window.fetch.bind(window);
-        window.fetch = (input, init) => {
-            try {
-                const normalizeUrl = (url) => url.replace('http://localhost:5000', 'http://127.0.0.1:5000');
-                if (typeof input === 'string') {
-                    return _nativeFetch(normalizeUrl(input), init);
-                }
-                if (input instanceof Request) {
-                    const fixedUrl = normalizeUrl(input.url);
-                    if (fixedUrl !== input.url) {
-                        return _nativeFetch(new Request(fixedUrl, input), init);
-                    }
-                }
-            } catch (_) {
-                // Fall through to native fetch
-            }
-            return _nativeFetch(input, init);
-        };
-
         let selectedFile = null;
         let currentJobId = null;
         let selectedNarrativeMedia = null;
@@ -337,16 +317,18 @@
         let generatedImages = [];
         let generatedMovementMatrix = null;
         let currentGeneratedImageIndex = 0;
-        const DEFAULT_API_BASE = 'http://127.0.0.1:5000';
+        const LOCAL_DEV_API_BASE = 'http://127.0.0.1:5000';
+        const DEFAULT_API_BASE = window.location.protocol.startsWith('http')
+            ? window.location.origin
+            : LOCAL_DEV_API_BASE;
         let apiBase = DEFAULT_API_BASE;
         let lastNetworkAttempts = [];
 
         function candidateApiBases() {
             if (window.location.protocol.startsWith('http')) {
-                // Avoid cross-origin hops (127.0.0.1 <-> localhost) when already on HTTP.
                 return [window.location.origin];
             }
-            return [DEFAULT_API_BASE];
+            return [LOCAL_DEV_API_BASE, 'http://localhost:5000'];
         }
 
         async function fetchWithFallback(path, options = {}) {
@@ -420,31 +402,24 @@
 
         function checkServerMode() {
             const isFile = window.location.protocol === 'file:';
-            const onBackendHost = window.location.protocol === 'http:' &&
-                (window.location.host === '127.0.0.1:5000' || window.location.host === 'localhost:5000');
-
-            if (!onBackendHost) {
-                const warning = document.getElementById('loadWarning');
-                warning.classList.remove('hidden');
-                warning.innerHTML = `
-                    <strong>Use backend URL</strong>: Open this app from
-                    <a class="underline" href="http://127.0.0.1:5000">http://127.0.0.1:5000</a>
-                    (or <a class="underline" href="http://localhost:5000">http://localhost:5000</a>).
-                `;
-                // Auto-hop to the Flask server after a short delay for IDE/file-preview users.
-                setTimeout(() => {
-                    window.location.href = 'http://127.0.0.1:5000';
-                }, 700);
-            }
+            const warning = document.getElementById('loadWarning');
 
             if (isFile) {
-                document.getElementById('loadWarning').classList.remove('hidden');
+                warning.classList.remove('hidden');
+                warning.innerHTML = `
+                    <strong>Local preview mode</strong>: Open this app from
+                    <a class="underline" href="http://127.0.0.1:5000">http://127.0.0.1:5000</a>
+                    (or <a class="underline" href="http://localhost:5000">http://localhost:5000</a>)
+                    after starting <code>python app.py</code>.
+                `;
+            } else {
+                warning.classList.add('hidden');
             }
 
             if (!isFile && window.location.protocol.startsWith('http')) {
                 apiBase = window.location.origin;
             } else {
-                apiBase = DEFAULT_API_BASE;
+                apiBase = LOCAL_DEV_API_BASE;
             }
         }
 
@@ -508,7 +483,10 @@
                     return;
                 }
             } catch (e) {
-                showError('Cannot reach the server. Start it with <code>python app.py</code>, then open <code>http://127.0.0.1:5000</code>. Error: ' + e.message + networkDebugInfo());
+                const hostHint = window.location.protocol.startsWith('http')
+                    ? `<code>${window.location.origin}</code>`
+                    : '<code>http://127.0.0.1:5000</code>';
+                showError('Cannot reach the server. Use the app URL ' + hostHint + '. Error: ' + e.message + networkDebugInfo());
                 return;
             }
 
