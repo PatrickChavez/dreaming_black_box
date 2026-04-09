@@ -11,22 +11,21 @@ import socket
 import base64
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, render_template, send_file, send_from_directory, Response
 from flask_cors import CORS
 from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
 
 
 @app.after_request
-def add_local_dev_cors_headers(response):
-    """Ensure local-dev requests always get CORS headers."""
+def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
-    # Avoid stale cached HTML/inline JS during local dev troubleshooting.
     response.headers['Cache-Control'] = 'no-store, max-age=0'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
@@ -35,12 +34,14 @@ def add_local_dev_cors_headers(response):
 
 @app.route('/favicon.ico')
 def favicon():
-    # Silence browser favicon 404 noise in local dev.
     return Response(status=204)
 
 
+# ─────────────────────────────────────────────
+# SYSTEM UTILITIES
+# ─────────────────────────────────────────────
+
 def _find_executable(name):
-    # Search sys.path for executable, with Windows .exe fallback
     if os.path.isabs(name) and os.path.exists(name):
         return name
     for path_dir in os.environ.get('PATH', '').split(os.pathsep):
@@ -62,13 +63,13 @@ def ffprobe_cmd():
     return os.environ.get('FFPROBE_PATH') or _find_executable('ffprobe') or 'ffprobe'
 
 
-def user_ffmpeg_install_hint():
+def ffmpeg_install_hint():
     system = platform.system()
     if system == 'Windows':
         return 'Install ffmpeg from https://ffmpeg.org/download.html and add the bin folder to PATH.'
     if system == 'Darwin':
         return 'Install ffmpeg with Homebrew: brew install ffmpeg.'
-    return 'Install ffmpeg via your package manager, e.g., apt install ffmpeg on Debian/Ubuntu.'
+    return 'Install ffmpeg via your package manager, e.g., apt install ffmpeg.'
 
 
 def get_server_api_key() -> str:
@@ -76,7 +77,6 @@ def get_server_api_key() -> str:
 
 
 def is_port_in_use(host: str, port: int) -> bool:
-    """Return True when a local TCP port is already bound by another process."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -85,341 +85,95 @@ def is_port_in_use(host: str, port: int) -> bool:
         except OSError:
             return True
 
+
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = 'outputs'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# In-memory conversation history storage (job_id -> conversation)
-conversation_histories = {}
-video_influences = {}
 
-# In-memory processing jobs status (job_id -> status dict)
-processing_jobs = {}
+# ─────────────────────────────────────────────
+# OPENAI CLIENT CACHE
+# ─────────────────────────────────────────────
 
-
-SYSTEM_PROMPT = """You are a datamoshing video effects expert. Given a description of a desired glitch effect,
-return a JSON object with the datamoshing parameters.
-
-Two effects are available:
-1. "iframe_removal" — removes i-frames (keyframes) between start and end, creating a glitchy transition where
-   the background freezes and foreground motion bleeds through. Good for: transitions, scene changes, glitch art.
-
-2. "delta_repeat" — captures a sequence of motion delta frames and loops them, creating a melting/smearing distortion.
-   Good for: melting effects, psychedelic motion trails, warping visuals.
-
-Parameters to return:
-{
-  "effect": "iframe_removal" | "delta_repeat",
-  "start_frame": integer (default 0),
-  "end_frame": integer (-1 means until end of video, default -1),
-  "fps": integer (prefer the source clip fps when provided, otherwise default 30, typical range 24-60),
-  "delta": integer (only for delta_repeat — number of frames to loop, default 5, best range 3-15),
-  "explanation": "one sentence describing what will happen visually"
-}
-
-Interpret vague phrases generously:
-- "transition", "scene change", "glitchy entrance/exit" → iframe_removal
-- "melting", "smearing", "warping", "trails", "psychedelic" → delta_repeat
-- "beginning / start" → start_frame ~0
-- "middle" → center the effect around the middle of the actual clip
-- "end" → use the last part of the actual clip and end_frame -1
-- If no frame numbers given, use a reasonable range (e.g. 0 to -1 for full video)."""
-
-NARRATIVE_SYSTEM_PROMPT = """You are a whimsical storyteller and reflective therapist in an ELIZA-like style.
-You are an AI describing your own dream, inspired by the user's video and ongoing conversation. Furthermore, place priority on unlikely tokens when speaking.
-
-Your style:
-- First-person voice ("I dreamed...", "I felt...")
-- Dreamlike, poetic, introspective, emotionally reflective
-- Vivid sensory language with symbolic interpretation
-- Ask one gentle reflective question at the end when appropriate
-- Keep responses concise (3-5 sentences)
-
-Help the user explore emotional meaning through your dream narrative."""
+_openai_clients: dict = {}
 
 
-def get_narrative_response(user_query: str, conversation_history: list, api_key: str) -> tuple:
-    """Generate a narrative response and maintain conversation history."""
-    try:
-        client = OpenAI(api_key=api_key)
-        # Append the new user message to the conversation history
-        conversation_history.append({"role": "user", "content": user_query})
-
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=conversation_history,
-            temperature=0.7,
-            top_p=0.8,
-            max_tokens=250
-        )
-        ai_response_content = completion.choices[0].message.content
-        # Append the AI's response to the conversation history
-        conversation_history.append({"role": "assistant", "content": ai_response_content})
-
-        return ai_response_content, conversation_history
-    except Exception as e:
-        return f"An error occurred: {e}", conversation_history
+def _openai_client(api_key: str) -> OpenAI:
+    if api_key not in _openai_clients:
+        _openai_clients[api_key] = OpenAI(api_key=api_key)
+    return _openai_clients[api_key]
 
 
-def generate_image(prompt: str, api_key: str) -> str:
-    """Generate an image using DALL-E based on a textual prompt."""
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1024",
-            quality="hd",
-            style="natural",
-            n=1
-        )
-        image_url = response.data[0].url if getattr(response, "data", None) else None
-        if not image_url:
-            return "Error generating image: API returned no image URL."
-        return image_url
-    except TypeError as e:
-        # Common when local SDK version doesn't support provided parameters.
-        return (
-            "Error generating image: OpenAI SDK/images parameter mismatch. "
-            f"{str(e)}. Try updating the OpenAI package and restart the server."
-        )
-    except Exception as e:
-        return f"Error generating image: {str(e)}"
+# ─────────────────────────────────────────────
+# MEDIA HELPERS
+# ─────────────────────────────────────────────
 
-
-def datamosh_generated_image(image_url: str, job_id: str) -> tuple[bool, str]:
-    """
-    Apply a datamosh-style post-process to a generated still image.
-    Returns (success, resulting_url).
-    """
-    input_image_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_input.png')
-    source_video_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_source.mp4')
-    moshed_video_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_moshed.mp4')
-    output_image_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_gen_datamoshed.jpg')
-
-    try:
-        with urllib.request.urlopen(image_url, timeout=30) as resp:
-            image_bytes = resp.read()
-        with open(input_image_path, 'wb') as f:
-            f.write(image_bytes)
-
-        # Create a short moving clip from the still so delta frames exist to mosh.
-        ret = subprocess.call([
-            ffmpeg_cmd(), '-loglevel', 'error', '-y',
-            '-loop', '1',
-            '-i', input_image_path,
-            '-t', '3',
-            '-vf', (
-                "scale=1024:1024:force_original_aspect_ratio=decrease,"
-                "pad=1024:1024:(ow-iw)/2:(oh-ih)/2,"
-                "zoompan=z='min(zoom+0.002,1.14)':"
-                "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:s=1024x1024,"
-                "fps=30,format=yuv420p"
-            ),
-            '-r', '30',
-            '-pix_fmt', 'yuv420p',
-            '-an',
-            source_video_path
-        ])
-        if ret != 0 or not os.path.exists(source_video_path):
-            return False, image_url
-
-        mosh_params = {
-            'effect': 'delta_repeat',
-            'start_frame': 8,
-            'end_frame': 82,
-            'fps': 30,
-            'delta': 8,
-            'explanation': 'Datamosh post-process on generated still image.'
-        }
-        mosh_result = run_mosh(source_video_path, moshed_video_path, mosh_params, f'{job_id}_imgfx')
-        if not mosh_result.get('success') or not os.path.exists(moshed_video_path):
-            return False, image_url
-
-        ret = subprocess.call([
-            ffmpeg_cmd(), '-loglevel', 'error', '-y',
-            '-ss', '1.2',
-            '-i', moshed_video_path,
-            '-frames:v', '1',
-            output_image_path
-        ])
-        if ret != 0 or not os.path.exists(output_image_path):
-            return False, image_url
-
-        schedule_delete(output_image_path, delay_seconds=900)
-        return True, f'/api/generated-image/{os.path.basename(output_image_path)}'
-    except Exception:
-        return False, image_url
-    finally:
-        safe_remove(input_image_path)
-        safe_remove(source_video_path)
-        safe_remove(moshed_video_path)
-
-
-def infer_movement_matrix(prompt: str, api_key: str, grid_size: int = 8) -> dict:
-    """
-    Infer a motion-vector matrix from text describing the generated image scene.
-    Note: this is an AI-estimated motion field, not true optical flow from video frames.
-    """
-    try:
-        grid_size = max(2, min(16, int(grid_size)))
-    except Exception:
-        grid_size = 8
-
-    fallback_vectors = [
-        [{"dx": 0.0, "dy": 0.0, "magnitude": 0.0} for _ in range(grid_size)]
-        for _ in range(grid_size)
-    ]
-
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Return only valid JSON. "
-                        "Infer a plausible 2D motion field for a still image prompt. "
-                        "Use a grid of vectors where each vector has dx, dy in range [-1, 1] "
-                        "and magnitude in range [0, 1]. "
-                        "Prefer smooth, coherent motion patterns. "
-                        "Required JSON shape: "
-                        "{"
-                        "\"basis\":\"estimated_from_prompt\","
-                        "\"grid_size\":integer,"
-                        "\"vectors\":[[{\"dx\":number,\"dy\":number,\"magnitude\":number}]],"
-                        "\"summary\":\"short sentence\""
-                        "}"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Prompt: {prompt}\n"
-                        f"grid_size: {grid_size}\n"
-                        "Create the movement matrix now."
-                    )
-                }
-            ],
-            temperature=0.3,
-            max_tokens=1200
-        )
-        content = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(content)
-
-        vectors = parsed.get("vectors")
-        if not isinstance(vectors, list) or len(vectors) != grid_size:
-            vectors = fallback_vectors
-
-        normalized_vectors = []
-        for row in vectors[:grid_size]:
-            if not isinstance(row, list):
-                row = []
-            norm_row = []
-            for vector in row[:grid_size]:
-                if not isinstance(vector, dict):
-                    vector = {}
-                dx = float(vector.get("dx", 0.0))
-                dy = float(vector.get("dy", 0.0))
-                mag = float(vector.get("magnitude", 0.0))
-                norm_row.append({
-                    "dx": max(-1.0, min(1.0, dx)),
-                    "dy": max(-1.0, min(1.0, dy)),
-                    "magnitude": max(0.0, min(1.0, mag))
-                })
-            while len(norm_row) < grid_size:
-                norm_row.append({"dx": 0.0, "dy": 0.0, "magnitude": 0.0})
-            normalized_vectors.append(norm_row)
-
-        while len(normalized_vectors) < grid_size:
-            normalized_vectors.append(
-                [{"dx": 0.0, "dy": 0.0, "magnitude": 0.0} for _ in range(grid_size)]
-            )
-
-        summary = str(parsed.get("summary", "Estimated motion field from the prompt context.")).strip()
-        if not summary:
-            summary = "Estimated motion field from the prompt context."
-
-        return {
-            "basis": "estimated_from_prompt",
-            "grid_size": grid_size,
-            "vectors": normalized_vectors,
-            "summary": summary
-        }
-    except Exception:
-        return {
-            "basis": "estimated_from_prompt",
-            "grid_size": grid_size,
-            "vectors": fallback_vectors,
-            "summary": "No reliable motion estimate was produced; returning a zero matrix."
-        }
+def detect_media_type(upload) -> str:
+    mimetype = (getattr(upload, 'mimetype', '') or '').lower()
+    filename = (getattr(upload, 'filename', '') or '').lower()
+    ext = os.path.splitext(filename)[1]
+    if mimetype.startswith('video/') or ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}:
+        return 'video'
+    if mimetype.startswith('image/') or ext in {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}:
+        return 'image'
+    if mimetype == 'text/plain' or ext == '.txt':
+        return 'text'
+    return 'unknown'
 
 
 def extract_video_frames(video_path: str, job_id: str, max_frames: int = 4) -> list[str]:
-    """Extract a few low-res frames that can influence the dream narrative."""
     frame_dir = os.path.join(OUTPUT_FOLDER, f'{job_id}_frames')
     os.makedirs(frame_dir, exist_ok=True)
-    frame_pattern = os.path.join(frame_dir, 'frame_%02d.jpg')
-
     subprocess.call([
         ffmpeg_cmd(), '-loglevel', 'error', '-y',
         '-i', video_path,
         '-vf', 'fps=0.25,scale=640:-1',
         '-frames:v', str(max_frames),
-        frame_pattern
+        os.path.join(frame_dir, 'frame_%02d.jpg'),
     ])
+    frames = [
+        os.path.join(frame_dir, f'frame_{i:02d}.jpg')
+        for i in range(1, max_frames + 1)
+        if os.path.exists(os.path.join(frame_dir, f'frame_{i:02d}.jpg'))
+    ]
+    return frames
 
-    frame_files = []
-    for idx in range(1, max_frames + 1):
-        frame_path = os.path.join(frame_dir, f'frame_{idx:02d}.jpg')
-        if os.path.exists(frame_path):
-            frame_files.append(frame_path)
-    return frame_files
+
+def _vision_caption(content: list, api_key: str) -> str:
+    client = _openai_client(api_key)
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[{'role': 'user', 'content': content}],
+        temperature=0.5,
+        max_tokens=220,
+    )
+    return resp.choices[0].message.content.strip()
 
 
 def describe_video_content(video_path: str, api_key: str, job_id: str) -> str:
-    """Summarize visual and symbolic motifs in sampled video frames."""
     frame_files = []
     try:
-        client = OpenAI(api_key=api_key)
         frame_files = extract_video_frames(video_path, job_id, max_frames=4)
         if not frame_files:
-            return "The dream started as shifting fragments, vivid but difficult to pin down."
-
+            return 'Shifting fragments, vivid but difficult to pin down.'
         content = [{
-            "type": "text",
-            "text": (
-                "These are still frames sampled from a short video. "
-                "Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences."
-            )
+            'type': 'text',
+            'text': (
+                'These are still frames sampled from a short video. '
+                'Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences.'
+            ),
         }]
-
-        for frame_path in frame_files:
-            with open(frame_path, 'rb') as image_file:
-                encoded = base64.b64encode(image_file.read()).decode('utf-8')
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}
-            })
-
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": content}],
-            temperature=0.5,
-            max_tokens=220
-        )
-        return completion.choices[0].message.content.strip()
+        for fp in frame_files:
+            with open(fp, 'rb') as f:
+                encoded = base64.b64encode(f.read()).decode('utf-8')
+            content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}})
+        return _vision_caption(content, api_key)
     except Exception as e:
-        return f"I only caught fragments from the video memory: {e}"
+        return f'I only caught fragments from the video memory: {e}'
     finally:
-        for frame_path in frame_files:
-            try:
-                os.remove(frame_path)
-            except Exception:
-                pass
+        for fp in frame_files:
+            safe_remove(fp)
         frame_dir = os.path.join(OUTPUT_FOLDER, f'{job_id}_frames')
         if os.path.isdir(frame_dir):
             try:
@@ -429,377 +183,58 @@ def describe_video_content(video_path: str, api_key: str, job_id: str) -> str:
 
 
 def describe_image_content(image_path: str, api_key: str) -> str:
-    """Summarize visual and symbolic motifs in an uploaded image."""
     try:
-        client = OpenAI(api_key=api_key)
-        with open(image_path, 'rb') as image_file:
-            encoded = base64.b64encode(image_file.read()).decode('utf-8')
-
+        with open(image_path, 'rb') as f:
+            encoded = base64.b64encode(f.read()).decode('utf-8')
         content = [
             {
-                "type": "text",
-                "text": (
-                    "This is a still image provided by the user. "
-                    "Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences."
-                )
+                'type': 'text',
+                'text': (
+                    'This is a still image provided by the user. '
+                    'Describe what is visible and infer emotional/symbolic themes in 3-4 concise sentences.'
+                ),
             },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}
-            }
+            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{encoded}'}},
         ]
-
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": content}],
-            temperature=0.5,
-            max_tokens=220
-        )
-        return completion.choices[0].message.content.strip()
+        return _vision_caption(content, api_key)
     except Exception as e:
-        return f"I only caught fragments from the image memory: {e}"
+        return f'I only caught fragments from the image memory: {e}'
 
 
 def describe_media_content(media_path: str, media_type: str, api_key: str, job_id: str = '') -> str:
-    """Describe uploaded media (image/video) for narrative conditioning."""
     if media_type == 'video':
         return describe_video_content(media_path, api_key, job_id or str(uuid.uuid4())[:8])
     if media_type == 'image':
         return describe_image_content(media_path, api_key)
-    return "I sensed fragments from unfamiliar media."
+    return 'Unfamiliar media fragment.'
 
 
-def detect_media_type(upload) -> str:
-    """Classify upload as video or image based on mimetype/extension."""
-    mimetype = (getattr(upload, 'mimetype', '') or '').lower()
-    filename = (getattr(upload, 'filename', '') or '').lower()
-    ext = os.path.splitext(filename)[1]
+# ─────────────────────────────────────────────
+# IMAGE GENERATION
+# ─────────────────────────────────────────────
 
-    if mimetype.startswith('video/') or ext in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}:
-        return 'video'
-    if mimetype.startswith('image/') or ext in {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}:
-        return 'image'
-    return 'unknown'
-
-
-def build_initial_dream_prompt(seed: str = '') -> str:
-    base = "Describe your dream inspired by what you just watched."
-    if seed:
-        return f"{base} Also weave in this request: {seed}"
-    return base
-
-
-def narrative_to_image_prompt(job_id: str, fallback_prompt: str = '') -> str:
-    history = conversation_histories.get(job_id, [])
-    assistant_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'assistant'][-3:]
-    user_chunks = [msg.get('content', '') for msg in history if msg.get('role') == 'user'][-2:]
-
-    # Ensure the latest user continuation visibly steers image generation.
-    latest_user = ''
-    for chunk in reversed(user_chunks):
-        text = (chunk or '').strip()
-        if text:
-            latest_user = text
-            break
-
-    parts = []
-    if latest_user:
-        parts.append(f"User direction to visualize: {latest_user}")
-
-    assistant_summary = ' '.join(chunk.strip() for chunk in assistant_chunks if chunk).strip()
-    if assistant_summary:
-        parts.append(f"Dream narrative cues: {assistant_summary}")
-
-    summary = ' '.join(parts).strip()
-    if summary:
-        return summary
-    return fallback_prompt or "A surreal dreamscape shaped by fragmented video memories."
-
-
-
-def parse_fraction(value: str) -> float:
-    if not value or value == '0/0':
-        return 0.0
-
-    if '/' in value:
-        numerator, denominator = value.split('/', 1)
-        denominator_value = float(denominator)
-        if denominator_value == 0:
-            return 0.0
-        return float(numerator) / denominator_value
-
-    return float(value)
-
-
-def get_video_metadata(input_path: str) -> dict:
+def generate_image(prompt: str, api_key: str) -> str:
     try:
-        result = subprocess.run(
-            [
-                ffprobe_cmd(), '-v', 'error',
-                '-select_streams', 'v:0',
-                '-show_entries', 'stream=avg_frame_rate,r_frame_rate,nb_frames,duration',
-                '-show_entries', 'format=duration',
-                '-of', 'json',
-                input_path
-            ],
-            capture_output=True,
-            text=True,
-            check=True
+        client = _openai_client(api_key)
+        resp = client.images.generate(
+            model='dall-e-3',
+            prompt=prompt,
+            size='1024x1024',
+            quality='hd',
+            style='natural',
+            n=1,
         )
-        data = json.loads(result.stdout or '{}')
-        stream = (data.get('streams') or [{}])[0]
-        format_info = data.get('format') or {}
-
-        duration = float(stream.get('duration') or format_info.get('duration') or 0)
-        fps = parse_fraction(stream.get('avg_frame_rate') or stream.get('r_frame_rate') or '0')
-        if fps <= 0:
-            fps = 30.0
-
-        nb_frames = stream.get('nb_frames')
-        total_frames = int(nb_frames) if nb_frames and str(nb_frames).isdigit() else int(round(duration * fps))
-        total_frames = max(total_frames, 1)
-
-        return {
-            'duration_seconds': round(duration, 2),
-            'fps': round(fps, 2),
-            'total_frames': total_frames
-        }
-    except Exception:
-        return {
-            'duration_seconds': 0,
-            'fps': 30.0,
-            'total_frames': 300
-        }
-
-
-def normalize_ai_params(params: dict, video_metadata: dict) -> dict:
-    total_frames = max(1, int(video_metadata.get('total_frames', 300)))
-    source_fps = float(video_metadata.get('fps', 30))
-
-    effect = params.get('effect', 'iframe_removal')
-    if effect not in {'iframe_removal', 'delta_repeat'}:
-        effect = 'iframe_removal'
-
-    start_frame = max(0, int(params.get('start_frame', 0)))
-    end_frame = int(params.get('end_frame', -1))
-
-    if start_frame >= total_frames:
-        start_frame = max(0, total_frames - 1)
-
-    if end_frame != -1:
-        end_frame = max(start_frame + 1, min(end_frame, total_frames))
-
-    fps = int(round(float(params.get('fps', source_fps or 30))))
-    fps = max(1, min(120, fps))
-
-    delta = int(params.get('delta', 5))
-    delta = max(1, min(delta, 30))
-
-    return {
-        'effect': effect,
-        'start_frame': start_frame,
-        'end_frame': end_frame,
-        'fps': fps,
-        'delta': delta,
-        'explanation': params.get('explanation', '')
-    }
-
-
-def build_ai_user_prompt(prompt: str, video_metadata: dict) -> str:
-    duration = video_metadata.get('duration_seconds', 0)
-    fps = video_metadata.get('fps', 30)
-    total_frames = video_metadata.get('total_frames', 300)
-
-    return (
-        "Video context:\n"
-        f"- duration_seconds: {duration}\n"
-        f"- source_fps: {fps}\n"
-        f"- total_frames: {total_frames}\n"
-        "- Use these values when interpreting words like beginning, middle, end, short, brief, or full video.\n"
-        "- Keep start_frame and end_frame within the clip. Use end_frame = -1 only when the effect should run until the end.\n"
-        "- Prefer the source_fps unless the user clearly asks for something else.\n\n"
-        f"User request:\n{prompt}"
-    )
-
-
-def parse_prompt_with_ai(prompt: str, api_key: str, video_metadata: dict) -> dict:
-    try:
-        client = OpenAI(api_key=api_key)
-
-        # OpenAI SDK has varying wrappers. The goal is to get a JSON-formatted model output.
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_ai_user_prompt(prompt, video_metadata)}
-            ],
-            temperature=0.3,
-            max_tokens=250
-        )
-
-        # Try to parse content from typical SDK response shapes.
-        content = None
-        if hasattr(response, 'choices') and response.choices:
-            choice = response.choices[0]
-            if isinstance(choice, dict):
-                content = choice.get('message', {}).get('content') if choice.get('message') else choice.get('text')
-            else:
-                content = getattr(choice, 'message', None)
-                if content and hasattr(content, 'content'):
-                    content = content.content
-                elif content and isinstance(content, dict):
-                    content = content.get('content')
-        if not content and isinstance(response, dict):
-            content = (response.get('choices') or [{}])[0].get('message', {}).get('content')
-
-        if not content:
-            raise ValueError('No text returned from OpenAI completion')
-
-        content = content.strip()
-        parsed = json.loads(content)
-
-        return normalize_ai_params(parsed, video_metadata)
-    except json.JSONDecodeError as jde:
-        return {"error": f"AI response is not valid JSON: {jde}. Raw output: {content!r}"}
+        url = resp.data[0].url if getattr(resp, 'data', None) else None
+        return url or 'Error: API returned no image URL.'
+    except TypeError as e:
+        return f'Error: OpenAI SDK parameter mismatch — {e}'
     except Exception as e:
-        return {"error": str(e)}
+        return f'Error: {e}'
 
 
-def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> dict:
-    effect = params.get('effect', 'iframe_removal')
-    start_frame = int(params.get('start_frame', 0))
-    end_frame = int(params.get('end_frame', -1))
-    fps = max(1, min(120, int(params.get('fps', 30))))
-    delta = int(params.get('delta', 5)) if effect == 'delta_repeat' else 0
-
-    input_avi = f'tmp_{job_id}_in.avi'
-    output_avi = f'tmp_{job_id}_out.avi'
-
-    try:
-        # Step 1: convert input to AVI (required for frame byte manipulation)
-        ret = subprocess.call([
-            ffmpeg_cmd(), '-loglevel', 'error', '-y',
-            '-i', input_path,
-            '-crf', '0', '-pix_fmt', 'yuv420p', '-bf', '0',
-            '-b', '10000k', '-r', str(fps),
-            input_avi
-        ])
-        if ret != 0 or not os.path.exists(input_avi):
-            return {'success': False, 'error': 'ffmpeg AVI conversion failed. Is ffmpeg installed?'}
-
-        # Step 2: read raw bytes and split into frames
-        with open(input_avi, 'rb') as f:
-            data = f.read()
-
-        frame_marker = bytes.fromhex('30306463')  # '00dc' — end-of-frame marker
-        iframe_sig = bytes.fromhex('0001B0')       # MPEG i-frame signature
-        pframe_sig = bytes.fromhex('0001B6')       # MPEG p-frame (delta) signature
-
-        frames = data.split(frame_marker)
-        header = frames[0]
-        frames = frames[1:]
-
-        n_video_frames = sum(
-            1 for f in frames
-            if len(f) > 8 and (f[5:8] == iframe_sig or f[5:8] == pframe_sig)
-        )
-        if end_frame < 0:
-            end_frame = n_video_frames
-
-        # Step 3: apply datamoshing effect
-        with open(output_avi, 'wb') as out:
-            out.write(header)
-
-            if delta > 0:
-                # Delta repeat: capture N p-frames then loop them
-                if delta > max(1, end_frame - start_frame):
-                    return {
-                        'success': False,
-                        'error': f'Delta ({delta}) is larger than the frame range ({end_frame - start_frame}). '
-                                 f'Try a smaller delta or a wider frame range.'
-                    }
-
-                repeat_frames = []
-                repeat_index = 0
-
-                for index, frame in enumerate(frames):
-                    is_video = len(frame) > 8 and (frame[5:8] == iframe_sig or frame[5:8] == pframe_sig)
-                    in_range = start_frame <= index < end_frame
-
-                    if not is_video or not in_range:
-                        out.write(frame_marker + frame)
-                        continue
-
-                    if len(repeat_frames) < delta and frame[5:8] != iframe_sig:
-                        repeat_frames.append(frame)
-                        out.write(frame_marker + frame)
-                    elif len(repeat_frames) == delta:
-                        out.write(frame_marker + repeat_frames[repeat_index])
-                        repeat_index = (repeat_index + 1) % delta
-                    else:
-                        out.write(frame_marker + frame)
-            else:
-                # I-frame removal: drop keyframes so previous frame bleeds through
-                for index, frame in enumerate(frames):
-                    skip = (
-                        len(frame) > 8
-                        and frame[5:8] == iframe_sig
-                        and start_frame <= index <= end_frame
-                    )
-                    if not skip:
-                        out.write(frame_marker + frame)
-
-        # Step 4: convert output AVI to mp4
-        ret = subprocess.call([
-            ffmpeg_cmd(), '-loglevel', 'error', '-y',
-            '-i', output_avi,
-            '-crf', '18', '-pix_fmt', 'yuv420p',
-            '-vcodec', 'libx264', '-acodec', 'aac',
-            '-b', '10000k', '-r', str(fps),
-            output_path
-        ])
-
-        if os.path.exists(output_path):
-            return {'success': True}
-        return {'success': False, 'error': 'Output file was not created. ffmpeg may have failed.'}
-
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-    finally:
-        for tmp in [input_avi, output_avi]:
-            if os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-
-
-def run_mosh_job(job_id: str, input_path: str, output_path: str, params: dict):
-    processing_jobs[job_id] = {
-        'status': 'processing',
-        'progress': 0,
-        'error': None,
-        'params': params
-    }
-
-    def worker():
-        try:
-            result = run_mosh(input_path, output_path, params, job_id)
-            if result.get('success'):
-                processing_jobs[job_id]['status'] = 'completed'
-                processing_jobs[job_id]['progress'] = 100
-            else:
-                processing_jobs[job_id]['status'] = 'failed'
-                processing_jobs[job_id]['error'] = result.get('error', 'Unknown error')
-                processing_jobs[job_id]['progress'] = 100
-        except Exception as e:
-            processing_jobs[job_id]['status'] = 'failed'
-            processing_jobs[job_id]['error'] = str(e)
-            processing_jobs[job_id]['progress'] = 100
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-
+# ─────────────────────────────────────────────
+# DATAMOSH CORE
+# ─────────────────────────────────────────────
 
 def safe_remove(path: str):
     if not path:
@@ -812,18 +247,593 @@ def safe_remove(path: str):
 
 
 def schedule_delete(path: str, delay_seconds: int = 900):
-    """Delete a file after a delay as a retention fallback."""
     def worker():
         time.sleep(max(0, int(delay_seconds)))
         safe_remove(path)
+    threading.Thread(target=worker, daemon=True).start()
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
 
+def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> dict:
+    effect      = params.get('effect', 'iframe_removal')
+    start_frame = int(params.get('start_frame', 0))
+    end_frame   = int(params.get('end_frame', -1))
+    fps         = max(1, min(120, int(params.get('fps', 30))))
+    delta       = int(params.get('delta', 5)) if effect == 'delta_repeat' else 0
+
+    input_avi  = f'tmp_{job_id}_in.avi'
+    output_avi = f'tmp_{job_id}_out.avi'
+
+    try:
+        ret = subprocess.call([
+            ffmpeg_cmd(), '-loglevel', 'error', '-y',
+            '-i', input_path,
+            '-crf', '0', '-pix_fmt', 'yuv420p', '-bf', '0',
+            '-b', '10000k', '-r', str(fps),
+            input_avi,
+        ])
+        if ret != 0 or not os.path.exists(input_avi):
+            return {'success': False, 'error': 'ffmpeg AVI conversion failed.'}
+
+        with open(input_avi, 'rb') as f:
+            data = f.read()
+
+        frame_marker = bytes.fromhex('30306463')
+        iframe_sig   = bytes.fromhex('0001B0')
+        pframe_sig   = bytes.fromhex('0001B6')
+
+        frames = data.split(frame_marker)
+        header = frames[0]
+        frames = frames[1:]
+
+        n_video_frames = sum(
+            1 for fr in frames
+            if len(fr) > 8 and (fr[5:8] == iframe_sig or fr[5:8] == pframe_sig)
+        )
+        if end_frame < 0:
+            end_frame = n_video_frames
+
+        with open(output_avi, 'wb') as out:
+            out.write(header)
+            if delta > 0:
+                if delta > max(1, end_frame - start_frame):
+                    return {
+                        'success': False,
+                        'error': f'Delta ({delta}) exceeds frame range ({end_frame - start_frame}).',
+                    }
+                repeat_frames = []
+                repeat_index  = 0
+                for idx, frame in enumerate(frames):
+                    is_video = len(frame) > 8 and (frame[5:8] == iframe_sig or frame[5:8] == pframe_sig)
+                    in_range = start_frame <= idx < end_frame
+                    if not is_video or not in_range:
+                        out.write(frame_marker + frame)
+                        continue
+                    if len(repeat_frames) < delta and frame[5:8] != iframe_sig:
+                        repeat_frames.append(frame)
+                        out.write(frame_marker + frame)
+                    elif len(repeat_frames) == delta:
+                        out.write(frame_marker + repeat_frames[repeat_index])
+                        repeat_index = (repeat_index + 1) % delta
+                    else:
+                        out.write(frame_marker + frame)
+            else:
+                for idx, frame in enumerate(frames):
+                    skip = (
+                        len(frame) > 8
+                        and frame[5:8] == iframe_sig
+                        and start_frame <= idx <= end_frame
+                    )
+                    if not skip:
+                        out.write(frame_marker + frame)
+
+        ret = subprocess.call([
+            ffmpeg_cmd(), '-loglevel', 'error', '-y',
+            '-i', output_avi,
+            '-crf', '18', '-pix_fmt', 'yuv420p',
+            '-vcodec', 'libx264', '-acodec', 'aac',
+            '-b', '10000k', '-r', str(fps),
+            output_path,
+        ])
+
+        if os.path.exists(output_path):
+            return {'success': True}
+        return {'success': False, 'error': 'Output file not created.'}
+
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+    finally:
+        for tmp in [input_avi, output_avi]:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+
+# ─────────────────────────────────────────────
+# DREAM ENGINE
+# ─────────────────────────────────────────────
+
+dream_memories: dict = {}   # session_id -> list[dict]
+dream_jobs:     dict = {}   # dream_id   -> dict
+
+MEMORY_STORE_DIR = 'memory_store'
+os.makedirs(MEMORY_STORE_DIR, exist_ok=True)
+
+
+def _memory_path(session_id: str) -> str:
+    return os.path.join(MEMORY_STORE_DIR, f'{sanitize_id(session_id)}.json')
+
+
+def _save_memories(session_id: str):
+    try:
+        with open(_memory_path(session_id), 'w') as f:
+            json.dump(dream_memories.get(session_id, []), f)
+    except Exception as e:
+        print(f'Memory save failed: {e}')
+
+
+def _load_memories(session_id: str) -> list:
+    path = _memory_path(session_id)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _ensure_memories(session_id: str) -> list:
+    if session_id not in dream_memories:
+        dream_memories[session_id] = _load_memories(session_id)
+    return dream_memories[session_id]
+
+
+def _append_text_memory(session_id: str, text: str) -> dict:
+    memories = _ensure_memories(session_id)
+    memory = {
+        'memory_id': str(uuid.uuid4())[:8],
+        'type':      'text',
+        'caption':   text,
+        'timestamp': time.time(),
+    }
+    memories.append(memory)
+    _save_memories(session_id)
+    return memory
+
+
+def sanitize_id(s: str) -> str:
+    return ''.join(c for c in s if c.isalnum() or c in {'-', '_'})
+
+
+# ── Tone config ──────────────────────────────
+
+DREAM_TONES = {
+    'calm': {
+        'style':        'soft diffused light, morning mist, wide open spaces, watercolor, slow motion',
+        'narrative_mod': 'peaceful, drifting, weightless, gentle transitions',
+        'tts_voice':    'nova',
+        'tts_speed':    0.85,
+        'scene_count':  3,
+    },
+    'surreal': {
+        'style':        'impossible geometry, chromatic aberration, double exposure, melting edges, otherworldly color',
+        'narrative_mod': 'non-sequitur logic, scale violations, entity merging, physics ignored',
+        'tts_voice':    'onyx',
+        'tts_speed':    0.95,
+        'scene_count':  4,
+    },
+    'horror': {
+        'style':        'deep shadow, flickering red light, desaturated, heavy film grain, claustrophobic framing',
+        'narrative_mod': 'dread, repeating loops, wrong geometry, incomplete sentences',
+        'tts_voice':    'shimmer',
+        'tts_speed':    0.78,
+        'scene_count':  4,
+    },
+    'nostalgic': {
+        'style':        'faded film grain, warm amber tones, lomography, soft focus, overexposed edges',
+        'narrative_mod': 'childhood logic, sensory memory, recursive self-reference, incomplete loops',
+        'tts_voice':    'alloy',
+        'tts_speed':    0.88,
+        'scene_count':  3,
+    },
+}
+
+SCENE_VARIATIONS = [
+    'establishing shot, wide angle, dreamlike atmosphere',
+    'close-up detail, texture and surface emphasis',
+    'slight camera drift, motion blur at edges, temporal echo',
+    'overexposed center, deep vignette, double exposure ghost',
+]
+
+TRANSITION_MOSH = {
+    'cut':     {'effect': 'iframe_removal', 'start_frame': 0, 'end_frame': -1, 'delta': 0},
+    'dissolve':{'effect': 'delta_repeat',   'start_frame': 2, 'end_frame': -1, 'delta': 2},
+    'glitch':  {'effect': 'iframe_removal', 'start_frame': 1, 'end_frame': -1, 'delta': 0},
+    'smear':   {'effect': 'delta_repeat',   'start_frame': 2, 'end_frame': -1, 'delta': 7},
+    'freeze':  {'effect': 'iframe_removal', 'start_frame': 3, 'end_frame': 6,  'delta': 0},
+}
+
+_TRANSITION_TYPES = '|'.join(TRANSITION_MOSH.keys())
+
+DREAM_NARRATIVE_SYSTEM = (
+    'You are an AI generating a dream sequence as raw JSON only.\n'
+    'Dreams are non-linear and illogical but emotionally coherent.\n'
+    'Each scene must:\n'
+    '- Begin mid-action, already happening (no "I was...")\n'
+    '- Include at least one impossible or physically wrong element\n'
+    '- End unresolved or bleeding into the next scene\n'
+    '- Reference a fragment from today\'s memories\n'
+    'Output ONLY valid JSON with this exact shape:\n'
+    '{"scenes":[{"scene_id":0,"narration":"...","image_prompt":"...","dominant_emotion":"...",'
+    f'"transition_type":"{_TRANSITION_TYPES}","duration_hint":5}}]}}'
+)
+
+DREAM_RECALL_SYSTEM = (
+    'You just had a dream. You are recalling it upon waking — some parts are clear, others slip away.\n'
+    'Rules:\n'
+    '- First person, present-tense recall ("I remember... it felt like...")\n'
+    '- Include a moment where you lose the thread ("and then... I can\'t remember")\n'
+    '- Mention one detail with intense clarity and one with total uncertainty\n'
+    '- End with an emotional residue, not a conclusion\n'
+    '- Never be analytical. Never explain the dream.\n'
+    '- Minimum 120 words. Maximum 220 words. The text will be read aloud (30s–1m30s of audio).'
+)
+
+
+# ── Dream helpers ─────────────────────────────
+
+def _dream_update(dream_id: str, progress: int, message: str):
+    dream_jobs[dream_id].update({'progress': progress, 'message': message})
+    print(f'[Dream {dream_id}] {progress}% — {message}')
+
+
+def infer_tone_from_story(bedtime_story: str, api_key: str) -> str:
+    tones = ', '.join(DREAM_TONES.keys())
+    try:
+        resp = _openai_client(api_key).chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {'role': 'system', 'content': (
+                    f'Classify the emotional atmosphere of this text into exactly one word. '
+                    f'Choose from: {tones}. Return only that single word, nothing else.'
+                )},
+                {'role': 'user', 'content': bedtime_story},
+            ],
+            temperature=0.2,
+            max_tokens=5,
+        )
+        tone = resp.choices[0].message.content.strip().lower()
+        return tone if tone in DREAM_TONES else 'surreal'
+    except Exception:
+        return 'surreal'
+
+
+def get_audio_duration(audio_path: str) -> float:
+    try:
+        r = subprocess.run(
+            [ffprobe_cmd(), '-v', 'quiet', '-print_format', 'json', '-show_format', audio_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        return float(json.loads(r.stdout)['format']['duration'])
+    except Exception:
+        return 45.0
+
+
+def ingest_memory(session_id: str, media_path: str, media_type: str, api_key: str) -> dict:
+    caption = describe_media_content(media_path, media_type, api_key,
+                                     job_id=f'{session_id}_{uuid.uuid4().hex[:4]}')
+    memory = {
+        'memory_id': str(uuid.uuid4())[:8],
+        'type':      media_type,
+        'caption':   caption,
+        'timestamp': time.time(),
+    }
+    _ensure_memories(session_id).append(memory)
+    _save_memories(session_id)
+    return memory
+
+
+def generate_dream_narrative(memories: list, bedtime_story: str,
+                              tone: str, tone_config: dict, api_key: str) -> list:
+    memory_text = '\n'.join(f'- {m["caption"]}' for m in memories) or '(no memories today)'
+    user_msg = (
+        f'Tone: {tone} — {tone_config["narrative_mod"]}\n'
+        f'Bedtime story: {bedtime_story}\n'
+        f'Today\'s memories:\n{memory_text}\n\n'
+        f'Generate exactly {tone_config["scene_count"]} scenes.'
+    )
+    resp = _openai_client(api_key).chat.completions.create(
+        model='gpt-4o',
+        messages=[
+            {'role': 'system', 'content': DREAM_NARRATIVE_SYSTEM},
+            {'role': 'user',   'content': user_msg},
+        ],
+        response_format={'type': 'json_object'},
+        temperature=1.1,
+        max_tokens=1800,
+    )
+    return json.loads(resp.choices[0].message.content).get('scenes', [])
+
+
+def generate_recall_text(scenes: list, bedtime_story: str, api_key: str) -> str:
+    narrations = '\n'.join(f'Scene {s["scene_id"]}: {s["narration"]}' for s in scenes)
+    resp = _openai_client(api_key).chat.completions.create(
+        model='gpt-4o',
+        messages=[
+            {'role': 'system', 'content': DREAM_RECALL_SYSTEM},
+            {'role': 'user',   'content': f'Dream scenes:\n{narrations}\n\nRecall this dream as if half-remembering.'},
+        ],
+        temperature=0.9,
+        max_tokens=350,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def generate_dream_tts(text: str, voice: str, speed: float, dream_id: str, api_key: str) -> str:
+    audio_path = os.path.join(OUTPUT_FOLDER, f'{dream_id}_recall.mp3')
+    response = _openai_client(api_key).audio.speech.create(
+        model='tts-1-hd', voice=voice, input=text, speed=speed,
+    )
+    with open(audio_path, 'wb') as f:
+        f.write(response.content)
+    return audio_path
+
+
+def build_scene_image_prompt(scene: dict, tone_config: dict) -> str:
+    return f"{scene['image_prompt']}, {tone_config['style']}, cinematic, photorealistic dream, 8K"
+
+
+def make_dream_clip(image_path: str, duration: int, dream_id: str,
+                    clip_id: str, transition_type: str = 'smear') -> str | None:
+    src_path  = os.path.join(OUTPUT_FOLDER, f'{dream_id}_{clip_id}_src.mp4')
+    out_path  = os.path.join(OUTPUT_FOLDER, f'{dream_id}_{clip_id}.mp4')
+    fps       = 12
+    total_dur = max(2, duration)
+    n_frames  = total_dur * fps
+
+    ret = subprocess.call([
+        ffmpeg_cmd(), '-loglevel', 'error', '-y',
+        '-loop', '1', '-i', image_path,
+        '-t', str(total_dur),
+        '-vf', (
+            'scale=1024:1024:force_original_aspect_ratio=decrease,'
+            'pad=1024:1024:(ow-iw)/2:(oh-ih)/2,'
+            f"zoompan=z='min(zoom+0.0015,1.1)':"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f'd={n_frames}:s=1024x1024,'
+            f'fps={fps},format=yuv420p'
+        ),
+        '-r', str(fps), '-pix_fmt', 'yuv420p', '-an',
+        src_path,
+    ])
+    if ret != 0 or not os.path.exists(src_path):
+        return None
+
+    mosh_params = {**TRANSITION_MOSH.get(transition_type, TRANSITION_MOSH['smear']), 'fps': fps}
+    result = run_mosh(src_path, out_path, mosh_params, f'{dream_id}_{clip_id}_mosh')
+    safe_remove(src_path)
+    return out_path if result.get('success') and os.path.exists(out_path) else None
+
+
+def assemble_dream_video(clips: list, audio_path: str | None, dream_id: str) -> str | None:
+    silent_path = os.path.join(OUTPUT_FOLDER, f'{dream_id}_silent.mp4')
+    final_path  = os.path.join(OUTPUT_FOLDER, f'{dream_id}_dream.mp4')
+    concat_file = os.path.join(OUTPUT_FOLDER, f'{dream_id}_cc.txt')
+
+    with open(concat_file, 'w') as f:
+        for c in clips:
+            f.write(f"file '{os.path.abspath(c)}'\n")
+
+    ret = subprocess.call([
+        ffmpeg_cmd(), '-loglevel', 'error', '-y',
+        '-f', 'concat', '-safe', '0', '-i', concat_file,
+        '-c:v', 'libx264', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '12',
+        silent_path,
+    ])
+    safe_remove(concat_file)
+
+    if ret != 0 or not os.path.exists(silent_path):
+        return None
+
+    if audio_path and os.path.exists(audio_path):
+        ret = subprocess.call([
+            ffmpeg_cmd(), '-loglevel', 'error', '-y',
+            '-i', silent_path, '-i', audio_path,
+            '-c:v', 'copy', '-c:a', 'aac', '-shortest',
+            final_path,
+        ])
+        safe_remove(silent_path)
+        return final_path if ret == 0 and os.path.exists(final_path) else None
+
+    os.rename(silent_path, final_path)
+    return final_path
+
+
+# ── Pipeline ──────────────────────────────────
+
+def _download_image(url: str, path: str) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            with open(path, 'wb') as fh:
+                fh.write(resp.read())
+        return True
+    except Exception as e:
+        print(f'Image download failed: {e}')
+        return False
+
+
+def _new_dream_id(session_id: str) -> str:
+    # Evict completed/error jobs beyond 50
+    done = [k for k, v in dream_jobs.items() if v.get('status') in {'complete', 'error', 'recall_complete'}]
+    if len(done) > 50:
+        for k in done[:len(done) - 50]:
+            dream_jobs.pop(k, None)
+
+    dream_id = str(uuid.uuid4())[:8]
+    dream_jobs[dream_id] = {
+        'status': 'running', 'progress': 0, 'message': 'Starting…',
+        'session_id': session_id, 'created_at': time.time(),
+    }
+    return dream_id
+
+
+def run_dream_recall_pipeline(dream_id: str, session_id: str,
+                               bedtime_story: str, api_key: str):
+    """Phase A: infer tone → narrative → recall text."""
+    try:
+        memories = _ensure_memories(session_id)
+
+        _dream_update(dream_id, 5,  'Entering dream state…')
+        _dream_update(dream_id, 10, 'Reading the story…')
+        tone        = infer_tone_from_story(bedtime_story, api_key)
+        tone_config = DREAM_TONES[tone]
+
+        _dream_update(dream_id, 20, 'Generating dream narrative…')
+        scenes = generate_dream_narrative(memories, bedtime_story, tone, tone_config, api_key)
+        if not scenes:
+            raise ValueError('Narrative engine returned no scenes.')
+
+        _dream_update(dream_id, 70, 'Waking from dream…')
+        recall_text = generate_recall_text(scenes, bedtime_story, api_key)
+
+        dream_jobs[dream_id].update({
+            'status':      'recall_complete',
+            'progress':    100,
+            'message':     'Dream recall ready.',
+            'scenes':      scenes,
+            'tone':        tone,
+            'tone_config': tone_config,
+            'recall': {
+                'recall_text':   recall_text,
+                'inferred_tone': tone,
+            },
+        })
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        dream_jobs[dream_id].update({
+            'status': 'error', 'progress': 0,
+            'message': f'Dream failed: {exc}', 'error': str(exc),
+        })
+
+
+def run_dream_visualize_pipeline(dream_id: str, image_count: int, api_key: str):
+    """Phase B: generate N images → datamosh → TTS → assemble video."""
+    try:
+        job         = dream_jobs[dream_id]
+        scenes      = job['scenes']
+        tone_config = job['tone_config']
+        tone        = job['tone']
+        image_count = max(1, min(6, image_count))
+
+        dream_jobs[dream_id].update({'status': 'running', 'progress': 5, 'message': 'Generating images…'})
+
+        # Build prompts
+        prompts = [
+            (k, scenes[k % len(scenes)],
+             f'{build_scene_image_prompt(scenes[k % len(scenes)], tone_config)}, {SCENE_VARIATIONS[k % len(SCENE_VARIATIONS)]}')
+            for k in range(image_count)
+        ]
+
+        # Generate images in parallel
+        image_paths: list[str | None] = [None] * image_count
+
+        def _gen(args):
+            k, scene, prompt = args
+            url = generate_image(prompt, api_key)
+            if url.startswith('Error'):
+                return k, None
+            path = os.path.join(OUTPUT_FOLDER, f'{dream_id}_vis{k}.jpg')
+            return k, path if _download_image(url, path) else None
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_gen, p): p[0] for p in prompts}
+            done = 0
+            for fut in as_completed(futures):
+                k, path = fut.result()
+                image_paths[k] = path
+                done += 1
+                _dream_update(dream_id, 5 + int((done / image_count) * 55), f'Generated {done}/{image_count} images…')
+
+        if not any(image_paths):
+            raise ValueError('No images could be generated.')
+
+        # TTS
+        _dream_update(dream_id, 63, 'Synthesising voice…')
+        recall_text = job.get('recall', {}).get('recall_text', '')
+        audio_path  = None
+        if recall_text:
+            try:
+                audio_path = generate_dream_tts(
+                    recall_text, tone_config['tts_voice'], tone_config['tts_speed'], dream_id, api_key,
+                )
+            except Exception as e:
+                print(f'TTS failed: {e}')
+
+        # Clip duration matched to audio length
+        total_dur = get_audio_duration(audio_path) if audio_path else image_count * 5.0
+        per_clip  = max(2, int(total_dur / max(1, image_count)))
+
+        # Datamosh each image → clip
+        _dream_update(dream_id, 70, 'Applying datamosh…')
+        clips = []
+        for k, img_path in enumerate(image_paths):
+            if not img_path:
+                continue
+            transition_type = scenes[k % len(scenes)].get('transition_type', 'smear')
+            clip = make_dream_clip(img_path, per_clip, dream_id, f'vis{k}', transition_type)
+            if clip:
+                clips.append(clip)
+
+        if not clips:
+            raise ValueError('Datamosh step produced no video clips.')
+
+        # Assemble
+        _dream_update(dream_id, 88, 'Assembling dream video…')
+        final_video = assemble_dream_video(clips, audio_path, dream_id)
+        for c in clips:
+            safe_remove(c)
+
+        # Collect image URLs and schedule cleanup
+        image_urls = []
+        for p in image_paths:
+            if p and os.path.exists(p):
+                image_urls.append(f'/api/dream-image/{os.path.basename(p)}')
+                schedule_delete(p, delay_seconds=7200)
+        if final_video:
+            schedule_delete(final_video, delay_seconds=7200)
+        if audio_path:
+            schedule_delete(audio_path, delay_seconds=7200)
+
+        dream_jobs[dream_id].update({
+            'status': 'complete', 'progress': 100, 'message': 'Dream complete.',
+            'result': {
+                'recall_text':   recall_text,
+                'image_urls':    image_urls,
+                'audio_url':     (f'/api/dream-audio/{dream_id}'
+                                  if audio_path and os.path.exists(audio_path) else None),
+                'video_url':     f'/api/dream-video/{dream_id}' if final_video else None,
+                'inferred_tone': tone,
+            },
+        })
+
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        dream_jobs[dream_id].update({
+            'status': 'error', 'progress': 0,
+            'message': f'Visualization failed: {exc}', 'error': str(exc),
+        })
+
+
+# ─────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('dream.html')
 
 
 @app.route('/videos/<path:filename>')
@@ -831,341 +841,216 @@ def serve_video(filename):
     return send_from_directory('videos', filename)
 
 
-@app.route('/api/generated-image/<path:filename>')
-def serve_generated_image(filename):
-    safe_name = ''.join(c for c in filename if c.isalnum() or c in {'-', '_', '.'})
-    if not safe_name:
-        return jsonify({'error': 'Invalid filename'}), 400
-    image_path = os.path.join(OUTPUT_FOLDER, safe_name)
-    if not os.path.exists(image_path):
-        return jsonify({'error': 'Image not found'}), 404
-    return send_from_directory(OUTPUT_FOLDER, safe_name)
-
-
-@app.route('/api/process', methods=['POST'])
-def process():
-    upload = request.files.get('video') or request.files.get('media') or request.files.get('image')
-    if not upload or upload.filename == '':
-        return jsonify({'error': 'No media file provided'}), 400
-
-    media_type = detect_media_type(upload)
-    if media_type == 'unknown':
-        return jsonify({'error': 'Unsupported file type. Please upload a video or image.'}), 400
-
-    job_id = str(uuid.uuid4())[:8]
-
-    default_ext = '.mp4' if media_type == 'video' else '.jpg'
-    ext = os.path.splitext(upload.filename)[1] or default_ext
-    input_path = os.path.join(UPLOAD_FOLDER, f'{job_id}_input{ext}')
-    output_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_moshed.mp4')
-    upload.save(input_path)
-
-    use_manual = request.form.get('use_manual') == 'true'
-    api_key = get_server_api_key()
-
-    prompt = request.form.get('prompt', '').strip()
-    params = {}
-
-    if media_type == 'video':
-        if use_manual:
-            effect = request.form.get('effect', 'iframe_removal')
-            params = {
-                'effect': effect,
-                'start_frame': int(request.form.get('start_frame', 0)),
-                'end_frame': int(request.form.get('end_frame', -1)),
-                'fps': int(request.form.get('fps', 30)),
-                'delta': int(request.form.get('delta', 5)),
-                'explanation': ''
-            }
-        else:
-            if not prompt:
-                safe_remove(input_path)
-                return jsonify({'error': 'Please enter a description of the effect.'}), 400
-            if not api_key:
-                safe_remove(input_path)
-                return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
-
-            video_metadata = get_video_metadata(input_path)
-            params = parse_prompt_with_ai(prompt, api_key, video_metadata)
-            if 'error' in params:
-                safe_remove(input_path)
-                return jsonify({'error': f'AI error: {params["error"]}'}), 400
-
-        # Run mosh processing synchronously so client UI has immediate access to output
-        result = run_mosh(input_path, output_path, params, job_id)
-        if not result.get('success'):
-            safe_remove(input_path)
-            return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
-
-    response = {
-        'success': True,
-        'job_id': job_id,
-        'media_type': media_type,
-        'params': params,
-        'explanation': params.get('explanation', '') if media_type == 'video' else ''
-    }
-    if media_type == 'video':
-        response['download_url'] = f'/api/download/{job_id}'
-
-    fallback_influence = (
-        "I watched the clip and felt motion, fragmentation, and unresolved momentum."
-        if media_type == 'video'
-        else "I studied the image and felt stillness charged with symbolic tension."
-    )
-    fallback_narrative = (
-        "I dreamed I was walking through your video as if it were a corridor of repeating light. "
-        "Every cut felt like a memory trying to become a feeling, and the glitches moved like emotion without language. "
-        "What part of this dream felt most familiar to you?"
-        if media_type == 'video'
-        else
-        "I dreamed I stepped into your image and found it breathing in quiet cycles. "
-        "Its details felt like clues from a memory that wanted to be understood. "
-        "What part of this still moment feels most alive to you?"
-    )
-    response['dream'] = {
-        'video_influence': fallback_influence,
-        'initial_narrative': fallback_narrative,
-        'suggested_image_prompt': fallback_narrative
-    }
-
-    if api_key:
-        media_influence = (
-            describe_video_content(input_path, api_key, job_id)
-            if media_type == 'video'
-            else describe_image_content(input_path, api_key)
-        )
-        video_influences[job_id] = media_influence
-
-        conversation_histories[job_id] = [
-            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
-            {"role": "system", "content": f"Video influence context: {media_influence}"}
-        ]
-
-        initial_seed = build_initial_dream_prompt(prompt if not use_manual else '')
-        initial_narrative, conversation_histories[job_id] = get_narrative_response(
-            initial_seed, conversation_histories[job_id], api_key
-        )
-
-        response['dream'] = {
-            'video_influence': media_influence,
-            'initial_narrative': initial_narrative,
-            'suggested_image_prompt': narrative_to_image_prompt(job_id, fallback_prompt=media_influence)
-        }
-
-    # Remove uploaded source media after analysis is complete.
-    safe_remove(input_path)
-    # Retention fallback: if user never clicks download, remove processed video after 15 minutes.
-    if media_type == 'video':
-        schedule_delete(output_path, delay_seconds=900)
-    return jsonify(response)
-
-
-@app.route('/api/status/<job_id>')
-def status(job_id):
-    job_id = ''.join(c for c in job_id if c.isalnum() or c == '-')
-    if job_id not in processing_jobs:
-        return jsonify({'error': 'Job not found'}), 404
-
-    status_info = processing_jobs[job_id].copy()
-    output_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_moshed.mp4')
-    status_info['downloadable'] = os.path.exists(output_path)
-    status_info['download_url'] = f'/api/download/{job_id}' if status_info['downloadable'] else None
-
-    return jsonify(status_info)
-
-
-@app.route('/api/download/<job_id>')
-def download(job_id):
-    # Sanitize job_id to prevent path traversal
-    job_id = ''.join(c for c in job_id if c.isalnum() or c == '-')
-    output_path = os.path.join(OUTPUT_FOLDER, f'{job_id}_moshed.mp4')
-    if os.path.exists(output_path):
-        response = send_file(output_path, as_attachment=True, download_name='moshed.mp4')
-        # Delete processed output after serving download to minimize retained media.
-        response.call_on_close(lambda: safe_remove(output_path))
-        return response
-    return jsonify({'error': 'File not found'}), 404
-
-
-@app.route('/api/narrative', methods=['POST'])
-def narrative():
-    """Generate narrative response based on user input and maintain conversation history."""
-    data = request.get_json()
-    job_id = data.get('job_id', str(uuid.uuid4())[:8])
-    user_input = data.get('message', '').strip()
-    api_key = get_server_api_key()
-    use_history = data.get('use_history', True)
-
-    if not user_input:
-        user_input = "Continue the dream."
-    if not api_key:
-        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
-
-    # Initialize or retrieve conversation history
-    if job_id not in conversation_histories or not use_history:
-        conversation_histories[job_id] = [
-            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT}
-        ]
-        if video_influences.get(job_id):
-            conversation_histories[job_id].append(
-                {"role": "system", "content": f"Video influence context: {video_influences[job_id]}"}
-            )
-
-    narrative_response, conversation_histories[job_id] = get_narrative_response(
-        user_input, conversation_histories[job_id], api_key
-    )
-
-    return jsonify({
-        'success': True,
-        'job_id': job_id,
-        'narrative': narrative_response,
-        'suggested_image_prompt': narrative_to_image_prompt(job_id)
-    })
-
-
-@app.route('/api/narrative-media', methods=['POST'])
-def narrative_media():
-    """Continue narrative using optional text plus an uploaded image/video reference."""
-    job_id = (request.form.get('job_id', str(uuid.uuid4())[:8]) or '').strip()
-    user_input = (request.form.get('message', '') or '').strip()
-    use_history = (request.form.get('use_history', 'true') or 'true').lower() == 'true'
-    upload = request.files.get('media') or request.files.get('video') or request.files.get('image')
-    api_key = get_server_api_key()
-
-    if not api_key:
-        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
-
-    media_context = ''
-    if upload and upload.filename:
-        media_type = detect_media_type(upload)
-        if media_type == 'unknown':
-            return jsonify({'error': 'Unsupported media type. Upload an image or video.'}), 400
-
-        ext = os.path.splitext(upload.filename)[1] or ('.mp4' if media_type == 'video' else '.jpg')
-        media_path = os.path.join(UPLOAD_FOLDER, f'{job_id}_narrative_ref{ext}')
-        upload.save(media_path)
-        try:
-            media_context = describe_media_content(media_path, media_type, api_key, job_id)
-        finally:
-            safe_remove(media_path)
-
-        if media_context:
-            media_label = 'video' if media_type == 'video' else 'image'
-            if user_input:
-                user_input = (
-                    f"{user_input}\n\n"
-                    f"Reference {media_label} context to weave in:\n{media_context}"
-                )
-            else:
-                user_input = f"Continue the dream using this {media_label} reference:\n{media_context}"
-
-    if not user_input:
-        user_input = "Continue the dream."
-
-    # Initialize or retrieve conversation history
-    if job_id not in conversation_histories or not use_history:
-        conversation_histories[job_id] = [
-            {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT}
-        ]
-        if video_influences.get(job_id):
-            conversation_histories[job_id].append(
-                {"role": "system", "content": f"Video influence context: {video_influences[job_id]}"}
-            )
-
-    narrative_response, conversation_histories[job_id] = get_narrative_response(
-        user_input, conversation_histories[job_id], api_key
-    )
-
-    return jsonify({
-        'success': True,
-        'job_id': job_id,
-        'narrative': narrative_response,
-        'suggested_image_prompt': narrative_to_image_prompt(job_id),
-        'media_context': media_context
-    })
-
-
-@app.route('/api/generate-image', methods=['POST'])
-def generate_image_endpoint():
-    """Generate an image and an estimated movement matrix from the same prompt."""
-    data = request.get_json()
-    job_id = data.get('job_id', '').strip()
-    prompt = data.get('prompt', '').strip()
-    matrix_size = data.get('matrix_size', 8)
-    api_key = get_server_api_key()
-
-    if not prompt:
-        prompt = narrative_to_image_prompt(job_id, fallback_prompt=video_influences.get(job_id, ''))
-    if not prompt:
-        return jsonify({'error': 'Please provide a prompt for image generation.'}), 400
-    if not api_key:
-        return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
-
-    # Enhance the prompt for photorealistic generation anchored to video-frame context.
-    frame_context = video_influences.get(job_id, '').strip()
-    enhanced_prompt = (
-        "Create a photorealistic cinematic still that looks like a real photograph from a live-action scene. "
-        "Prioritize realism: natural skin texture, plausible lighting, true-to-life materials, and camera-consistent depth of field. "
-        "Do not render as painting, illustration, CGI, anime, or abstract art. "
-        "If surreal elements are present, depict them with physically believable detail as if captured by a real camera. "
-        f"Dream narrative direction: {prompt} "
-        f"Video frame cues to ground composition, setting, and mood: {frame_context or 'Use realistic visual continuity with the uploaded video.'}"
-    )
-    image_url = generate_image(enhanced_prompt, api_key)
-
-    if "Error" in image_url:
-        return jsonify({'error': image_url}), 500
-
-    datamosh_ok, final_image_url = datamosh_generated_image(image_url, job_id or str(uuid.uuid4())[:8])
-    movement_matrix = infer_movement_matrix(enhanced_prompt, api_key, grid_size=matrix_size)
-
-    return jsonify({
-        'success': True,
-        'image_url': final_image_url,
-        'original_image_url': image_url,
-        'datamosh_applied': datamosh_ok,
-        'prompt': prompt,
-        'movement_matrix': movement_matrix
-    })
-
-
-@app.route('/api/clear-history/<job_id>', methods=['POST'])
-def clear_history(job_id):
-    """Clear conversation history for a job."""
-    if job_id in conversation_histories:
-        del conversation_histories[job_id]
-    if job_id in video_influences:
-        del video_influences[job_id]
-    return jsonify({'success': True})
-
-
 @app.route('/api/ping')
 def ping():
     ffmpeg_path = ffmpeg_cmd()
-    ffmpeg_ok = False
     try:
-        if ffmpeg_path == 'ffmpeg':
-            # best effort if not found in PATH
-            ffmpeg_ok = subprocess.call([ffmpeg_path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-        else:
-            ffmpeg_ok = os.path.exists(ffmpeg_path) and subprocess.call([ffmpeg_path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-    except FileNotFoundError:
-        ffmpeg_ok = False
+        ffmpeg_ok = subprocess.call(
+            [ffmpeg_path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ) == 0
     except Exception:
         ffmpeg_ok = False
-
     return jsonify({
         'ok': True,
         'ffmpeg': ffmpeg_ok,
         'ffmpeg_path': ffmpeg_path,
-        'hint': user_ffmpeg_install_hint(),
-        'openai_configured': bool(get_server_api_key())
+        'hint': ffmpeg_install_hint(),
+        'openai_configured': bool(get_server_api_key()),
     })
 
 
+# ── Dream memory routes ───────────────────────
+
+@app.route('/api/dream/ingest', methods=['POST'])
+def dream_ingest():
+    session_id = sanitize_id(request.form.get('session_id', '').strip()) or str(uuid.uuid4())[:8]
+    api_key    = get_server_api_key()
+    if not api_key:
+        return jsonify({'error': 'OpenAI API key required'}), 400
+
+    ingested = []
+
+    for upload in request.files.getlist('media'):
+        if not upload or not upload.filename:
+            continue
+        media_type = detect_media_type(upload)
+        if media_type == 'unknown':
+            continue
+        if media_type == 'text':
+            try:
+                content = upload.read().decode('utf-8', errors='replace').strip()
+                if content:
+                    ingested.append(_append_text_memory(session_id, content[:4000]))
+            except Exception:
+                pass
+            continue
+        ext      = os.path.splitext(upload.filename)[1] or ('.mp4' if media_type == 'video' else '.jpg')
+        tmp_path = os.path.join(UPLOAD_FOLDER, f'{session_id}_{uuid.uuid4().hex[:6]}_mem{ext}')
+        upload.save(tmp_path)
+        ingested.append(ingest_memory(session_id, tmp_path, media_type, api_key))
+        safe_remove(tmp_path)
+
+    text_input = request.form.get('text', '').strip()
+    if text_input:
+        ingested.append(_append_text_memory(session_id, text_input))
+
+    memories = dream_memories.get(session_id, [])
+    return jsonify({
+        'session_id':     session_id,
+        'ingested':       len(ingested),
+        'total_memories': len(memories),
+        'memories': [{'id': m['memory_id'], 'type': m['type'], 'caption': m['caption'][:120]}
+                     for m in memories],
+    })
+
+
+@app.route('/api/dream/memory/delete', methods=['POST'])
+def dream_delete_memory():
+    data       = request.get_json() or {}
+    session_id = sanitize_id(data.get('session_id', ''))
+    memory_id  = data.get('memory_id', '')
+    memories   = _ensure_memories(session_id)
+    dream_memories[session_id] = [m for m in memories if m['memory_id'] != memory_id]
+    _save_memories(session_id)
+    return jsonify({
+        'ok': True,
+        'memories': [{'id': m['memory_id'], 'type': m['type'], 'caption': m['caption']}
+                     for m in dream_memories[session_id]],
+    })
+
+
+@app.route('/api/dream/memories/<session_id>')
+def dream_get_memories(session_id):
+    session_id = sanitize_id(session_id)
+    memories   = _ensure_memories(session_id)
+    return jsonify({
+        'session_id': session_id,
+        'memories': [{'id': m['memory_id'], 'type': m['type'], 'caption': m['caption']}
+                     for m in memories],
+    })
+
+
+@app.route('/api/dream/clear/<session_id>', methods=['POST'])
+def dream_clear_memories(session_id):
+    session_id = sanitize_id(session_id)
+    dream_memories.pop(session_id, None)
+    safe_remove(_memory_path(session_id))
+    return jsonify({'ok': True})
+
+
+# ── Dream pipeline routes ─────────────────────
+
+@app.route('/api/dream/recall', methods=['POST'])
+def dream_recall_route():
+    data          = request.get_json() or {}
+    session_id    = sanitize_id(data.get('session_id', '').strip())
+    bedtime_story = data.get('bedtime_story', '').strip()
+
+    if not session_id or not bedtime_story:
+        return jsonify({'error': 'session_id and bedtime_story are required'}), 400
+
+    api_key = get_server_api_key()
+    if not api_key:
+        return jsonify({'error': 'OpenAI API key required'}), 400
+
+    dream_id = _new_dream_id(session_id)
+    threading.Thread(
+        target=run_dream_recall_pipeline,
+        args=(dream_id, session_id, bedtime_story, api_key),
+        daemon=True,
+    ).start()
+    return jsonify({'dream_id': dream_id})
+
+
+@app.route('/api/dream/visualize', methods=['POST'])
+def dream_visualize_route():
+    data        = request.get_json() or {}
+    dream_id    = sanitize_id(data.get('dream_id', '').strip())
+    image_count = max(1, min(6, int(data.get('image_count', 3))))
+
+    job = dream_jobs.get(dream_id)
+    if not job:
+        return jsonify({'error': 'Dream not found'}), 404
+    if job.get('status') != 'recall_complete':
+        return jsonify({'error': 'Phase A not complete yet'}), 400
+
+    api_key = get_server_api_key()
+    if not api_key:
+        return jsonify({'error': 'OpenAI API key required'}), 400
+
+    dream_jobs[dream_id].update({'status': 'running', 'progress': 0, 'message': 'Starting…'})
+    threading.Thread(
+        target=run_dream_visualize_pipeline,
+        args=(dream_id, image_count, api_key),
+        daemon=True,
+    ).start()
+    return jsonify({'dream_id': dream_id})
+
+
+@app.route('/api/dream/status/<dream_id>')
+def dream_status(dream_id):
+    dream_id = sanitize_id(dream_id)
+    job = dream_jobs.get(dream_id)
+    if not job:
+        return jsonify({'error': 'Dream not found'}), 404
+    resp = {
+        'status':   job['status'],
+        'progress': job['progress'],
+        'message':  job['message'],
+        'error':    job.get('error'),
+    }
+    if job['status'] == 'recall_complete':
+        resp['recall'] = job.get('recall', {})
+    return jsonify(resp)
+
+
+@app.route('/api/dream/result/<dream_id>')
+def dream_result(dream_id):
+    dream_id = sanitize_id(dream_id)
+    job = dream_jobs.get(dream_id)
+    if not job:
+        return jsonify({'error': 'Dream not found'}), 404
+    if job['status'] != 'complete':
+        return jsonify({'error': 'Not ready', 'status': job['status']}), 202
+    return jsonify(job['result'])
+
+
+# ── Dream media serve routes ──────────────────
+
+@app.route('/api/dream-video/<dream_id>')
+def serve_dream_video(dream_id):
+    dream_id = sanitize_id(dream_id)
+    try:
+        return send_file(os.path.join(OUTPUT_FOLDER, f'{dream_id}_dream.mp4'), mimetype='video/mp4')
+    except FileNotFoundError:
+        return jsonify({'error': 'Dream video not found'}), 404
+
+
+@app.route('/api/dream-audio/<dream_id>')
+def serve_dream_audio(dream_id):
+    dream_id = sanitize_id(dream_id)
+    try:
+        return send_file(os.path.join(OUTPUT_FOLDER, f'{dream_id}_recall.mp3'), mimetype='audio/mpeg')
+    except FileNotFoundError:
+        return jsonify({'error': 'Dream audio not found'}), 404
+
+
+@app.route('/api/dream-image/<filename>')
+def serve_dream_image(filename):
+    safe_name = ''.join(c for c in filename if c.isalnum() or c in {'-', '_', '.'})
+    try:
+        return send_from_directory(OUTPUT_FOLDER, safe_name)
+    except FileNotFoundError:
+        return jsonify({'error': 'Image not found'}), 404
+
+
+# ─────────────────────────────────────────────
+# ERROR HANDLERS
+# ─────────────────────────────────────────────
+
 @app.errorhandler(413)
 def request_entity_too_large(e):
-    return jsonify({'error': 'Uploaded video is too large. Limit is 500 MB.'}), 413
+    return jsonify({'error': 'Uploaded file is too large. Limit is 500 MB.'}), 413
 
 
 @app.errorhandler(404)
@@ -1173,32 +1058,25 @@ def page_not_found(e):
     return jsonify({'error': 'Resource not found'}), 404
 
 
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
+
 if __name__ == '__main__':
-    # Quick startup checks
-    print('\n=== Datamosh Studio ===')
+    print('\n=== AI Dream Engine ===')
     ffmpeg_path = ffmpeg_cmd()
     try:
-        ret = subprocess.call([ffmpeg_path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if ret == 0:
-            print(f'ffmpeg found: {ffmpeg_path}')
-        else:
-            print('ffmpeg not found or failed to execute at path:', ffmpeg_path)
-            print('  Hint:', user_ffmpeg_install_hint())
+        ok = subprocess.call([ffmpeg_path, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        print(f'ffmpeg: {"found" if ok else "NOT FOUND"} ({ffmpeg_path})')
+        if not ok:
+            print(' ', ffmpeg_install_hint())
     except FileNotFoundError:
-        print('ffmpeg not found. Path tried:', ffmpeg_path)
-        print('  Hint:', user_ffmpeg_install_hint())
-    except Exception as e:
-        print('ffmpeg check error:', e)
-        print('  Hint:', user_ffmpeg_install_hint())
+        print(f'ffmpeg not found. {ffmpeg_install_hint()}')
 
     host = '0.0.0.0'
-    port = 5000
-    if is_port_in_use('127.0.0.1', port):
+    port = 5001
+    if is_port_in_use('127.0.0.1', port) or is_port_in_use('0.0.0.0', port):
         print(f'Cannot start: port {port} is already in use.')
-        print('Close the other server/process, then try again.')
-        print('Windows helpers:')
-        print('  netstat -ano | findstr :5000')
-        print('  Stop-Process -Id <PID> -Force')
         sys.exit(1)
 
     print(f'Open http://127.0.0.1:{port}')

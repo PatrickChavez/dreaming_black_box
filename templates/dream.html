@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>AI Dream Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        * { font-family: 'IBM Plex Mono', monospace; }
+
+        #videoBackground {
+            position: fixed; inset: 0; width: 100%; height: 100%;
+            object-fit: cover; z-index: 0;
+            filter: brightness(15%) contrast(115%) saturate(80%);
+        }
+        #videoOverlay {
+            position: fixed; inset: 0; z-index: 1; pointer-events: none;
+            background: rgba(2, 2, 8, 0.60);
+        }
+
+        @keyframes glitch {
+            0%, 88%, 100% { text-shadow: none; }
+            90% { text-shadow: -2px 0 rgba(255,255,255,0.5), 2px 0 #ffffff; }
+            92% { text-shadow:  2px 0 rgba(255,255,255,0.5),-2px 0 #ffffff; }
+            94% { text-shadow: none; }
+            96% { text-shadow: -1px 0 rgba(255,255,255,0.4), 1px 0 #ffffff; }
+        }
+        .glitch { animation: glitch 5s infinite; }
+
+        .spinner {
+            border: 2px solid #3f3f46; border-top-color: #e4e4e7;
+            border-radius: 50%; width: 16px; height: 16px;
+            animation: spin 0.7s linear infinite; display: inline-block;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .step-card {
+            background: rgba(10,10,12,0.78);
+            border: 1px solid rgba(100,100,110,0.25);
+            backdrop-filter: blur(8px);
+        }
+        .step-number {
+            width: 26px; height: 26px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 600; flex-shrink: 0;
+        }
+        .typewriter-text {
+            white-space: pre-wrap; font-family: 'IBM Plex Mono', monospace; color: #a1a1aa;
+        }
+        .dream-box {
+            min-height: 80px;
+            background: rgba(30,30,34,0.5);
+            border: 1px solid rgba(100,100,110,0.25);
+        }
+        .progress-bar-inner {
+            height: 100%; border-radius: 4px;
+            background: linear-gradient(90deg, #71717a, #e4e4e7);
+            transition: width 0.4s ease;
+        }
+        .memory-tag {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: rgba(30,30,34,0.7); border: 1px solid rgba(100,100,110,0.35);
+            border-radius: 4px; padding: 4px 8px; font-size: 11px; color: #a1a1aa;
+        }
+        .memory-tag button {
+            color: #52525b; cursor: pointer; line-height: 1;
+            background: none; border: none; padding: 0; font-size: 13px;
+        }
+        .memory-tag button:hover { color: #d4d4d8; }
+        .dream-image {
+            width: 100%; aspect-ratio: 1; object-fit: cover;
+            border-radius: 6px; border: 1px solid rgba(100,100,110,0.35);
+            cursor: pointer; transition: opacity 0.15s;
+        }
+        .dream-image:hover { opacity: 0.85; }
+        input[type="range"] {
+            appearance: none; -webkit-appearance: none;
+            width: 100%; height: 4px;
+            background: rgba(100,100,110,0.35); border-radius: 2px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #e4e4e7; border-radius: 50%; cursor: pointer;
+        }
+        .tone-badge {
+            display: inline-flex; align-items: center; gap: 4px;
+            border-radius: 4px; padding: 2px 8px; font-size: 10px;
+            border: 1px solid rgba(160,160,170,0.4);
+            background: rgba(80,80,90,0.2); color: #d4d4d8;
+        }
+    </style>
+</head>
+<body class="text-zinc-100 min-h-screen">
+
+<div class="max-w-2xl mx-auto px-4 py-12 relative z-10 space-y-6">
+
+    <!-- Header -->
+    <div class="mb-8">
+        <h1 class="text-xl font-semibold tracking-widest glitch mb-1">AI DREAM ENGINE</h1>
+        <p class="text-zinc-600 text-xs">Live your day → sleep → dream → wake up</p>
+    </div>
+
+    <!-- ── STEP 1: THE DAY ── -->
+    <div class="step-card rounded-xl p-5">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="step-number bg-zinc-800/80 text-zinc-300 border border-zinc-600/50">1</div>
+            <div class="flex-1 flex items-center justify-between">
+                <div>
+                    <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">The Day</h2>
+                    <p class="text-xs text-zinc-500 mt-0.5">Upload images, videos, or text files.</p>
+                </div>
+                <span id="memBadge" class="hidden text-xs text-zinc-400 border border-zinc-700/50 rounded px-2 py-0.5 bg-zinc-900/40"></span>
+            </div>
+        </div>
+
+        <!-- Drop zone -->
+        <div id="memDropZone"
+            class="border border-dashed border-zinc-700 rounded-lg p-8 text-center cursor-pointer hover:border-zinc-400 hover:bg-white/5 transition-all mb-3"
+            onclick="document.getElementById('memFileInput').click()"
+            ondragover="event.preventDefault(); this.classList.add('border-zinc-400','bg-white/5')"
+            ondragleave="this.classList.remove('border-zinc-400','bg-white/5')"
+            ondrop="handleMemDrop(event)">
+            <svg class="w-6 h-6 mx-auto mb-2 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+            </svg>
+            <p class="text-zinc-500 text-xs">Drop images, videos, or text files — or click to browse</p>
+            <input type="file" id="memFileInput" accept="video/*,image/*,text/*,.txt" multiple class="hidden"
+                onchange="handleMemFiles(this.files)">
+        </div>
+
+        <!-- Text / prompt history -->
+        <div class="mb-3">
+            <textarea id="memText" rows="2" placeholder="Or paste AI prompt history, notes, or describe what you experienced today…"
+                class="w-full bg-zinc-900/80 border border-zinc-800 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-500 resize-none"></textarea>
+        </div>
+
+        <button onclick="ingestMemory()" id="ingestBtn"
+            class="w-full py-2 bg-zinc-700 hover:bg-zinc-600 rounded text-sm font-medium transition-colors flex items-center justify-center gap-2">
+            Add to Memory
+        </button>
+
+        <!-- Memory list -->
+        <div id="memoryList" class="mt-4 space-y-1.5 hidden">
+            <p class="text-xs text-zinc-600 uppercase tracking-wider mb-2">Today's memories</p>
+            <div id="memoryTags" class="flex flex-wrap gap-2"></div>
+            <button onclick="clearMemories()" class="text-xs text-zinc-700 hover:text-red-400 mt-2 transition-colors">Clear all</button>
+        </div>
+    </div>
+
+    <!-- ── STEP 2: BEDTIME ── -->
+    <div class="step-card rounded-xl p-5">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="step-number bg-zinc-800/80 text-zinc-300 border border-zinc-600/50">2</div>
+            <div>
+                <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Bedtime</h2>
+                <p class="text-xs text-zinc-500 mt-0.5">Steer the dream. The AI will read the mood from your story.</p>
+            </div>
+        </div>
+
+        <textarea id="bedtimeStory" rows="5"
+            placeholder="Tell me a bedtime story…"
+            class="w-full bg-zinc-900/80 border border-zinc-800 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-500 resize-none leading-relaxed"></textarea>
+    </div>
+
+    <!-- ── STEP 3: DREAM RECALL ── -->
+    <div class="step-card rounded-xl p-5">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="step-number bg-zinc-800/80 text-zinc-300 border border-zinc-600/50">3</div>
+            <div>
+                <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Dream Recall</h2>
+                <p class="text-xs text-zinc-500 mt-0.5">Generate the dream narrative.</p>
+            </div>
+        </div>
+
+        <button id="recallBtn" onclick="startRecall()"
+            class="w-full py-3 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2">
+            Generate Dream Recall
+        </button>
+
+        <!-- Phase A progress -->
+        <div id="recallProgress" class="mt-5 hidden">
+            <div class="flex justify-between items-center mb-2">
+                <span id="recallMsg" class="text-xs text-zinc-400">Starting…</span>
+                <span id="recallPct" class="text-xs text-zinc-600">0%</span>
+            </div>
+            <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div id="recallBar" class="progress-bar-inner" style="width:0%"></div>
+            </div>
+        </div>
+
+        <!-- Recall result -->
+        <div id="recallResult" class="mt-5 hidden">
+            <div class="flex items-center gap-2 mb-3">
+                <p class="text-xs text-zinc-600 uppercase tracking-wider">Dream recall</p>
+                <span id="toneBadge" class="hidden tone-badge"></span>
+            </div>
+            <div class="dream-box rounded-lg p-4">
+                <div id="recallText" class="typewriter-text text-sm leading-relaxed"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── STEP 4: DREAM IMAGES + VIDEO ── -->
+    <div id="visualizeStep" class="step-card rounded-xl p-5 hidden">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="step-number bg-zinc-800/80 text-zinc-300 border border-zinc-600/50">4</div>
+            <div>
+                <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Dream</h2>
+                <p class="text-xs text-zinc-500 mt-0.5">Images → datamosh → voice narration → video.</p>
+            </div>
+        </div>
+
+        <!-- Image count picker -->
+        <div class="mb-5">
+            <div class="flex justify-between items-center mb-2">
+                <label class="text-xs text-zinc-500 uppercase tracking-wider">Images</label>
+                <div class="flex items-center gap-3">
+                    <span id="costEstimate" class="text-xs text-zinc-600"></span>
+                    <span id="imageCountLabel" class="text-sm font-semibold text-zinc-300">3</span>
+                </div>
+            </div>
+            <input type="range" id="imageCount" min="1" max="6" value="3"
+                oninput="updateImageCount(this.value)">
+            <div class="flex justify-between text-xs text-zinc-700 mt-1">
+                <span>1</span><span>6</span>
+            </div>
+        </div>
+
+        <button id="visualizeBtn" onclick="startVisualize()"
+            class="w-full py-3 bg-zinc-700 hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2">
+            Generate Dream
+        </button>
+
+        <!-- Phase B progress -->
+        <div id="visualizeProgress" class="mt-5 hidden">
+            <div class="flex justify-between items-center mb-2">
+                <span id="visualizeMsg" class="text-xs text-zinc-400">Starting…</span>
+                <span id="visualizePct" class="text-xs text-zinc-600">0%</span>
+            </div>
+            <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div id="visualizeBar" class="progress-bar-inner" style="width:0%"></div>
+            </div>
+        </div>
+
+        <!-- Results: images + audio + video all together -->
+        <div id="dreamResults" class="mt-6 hidden space-y-6">
+
+            <!-- Image grid -->
+            <div>
+                <p class="text-xs text-zinc-600 uppercase tracking-wider mb-3">Dream images</p>
+                <div id="imageList" class="grid grid-cols-2 gap-3"></div>
+            </div>
+
+            <!-- Audio -->
+            <div id="audioSection" class="hidden">
+                <p class="text-xs text-zinc-600 uppercase tracking-wider mb-2">Voice recall</p>
+                <audio id="recallAudio" class="w-full" controls></audio>
+            </div>
+
+            <!-- Video -->
+            <div id="videoSection" class="hidden">
+                <p class="text-xs text-zinc-600 uppercase tracking-wider mb-3">Dream video</p>
+                <video id="dreamVideo" controls class="w-full rounded-lg bg-black mb-3" style="max-height:480px"></video>
+                <a id="downloadDreamLink" href="#" target="_blank"
+                    class="block text-center w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 rounded text-sm transition-colors">
+                    Download dream.mp4
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Start over -->
+    <button id="resetBtn" onclick="resetDream()" class="hidden w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 rounded text-sm text-zinc-400 transition-colors">
+        Dream again
+    </button>
+
+    <!-- Error -->
+    <div id="errorBox" class="hidden">
+        <div class="bg-red-950/40 border border-red-900 rounded-lg p-4">
+            <p id="errorMsg" class="text-sm text-red-400"></p>
+        </div>
+    </div>
+
+</div>
+
+<!-- Background video -->
+<video autoplay muted loop id="videoBackground">
+    <source src="/videos/BlackBoxBG.mp4" type="video/mp4">
+</video>
+<div id="videoOverlay"></div>
+
+<script>
+    // ── State ──
+    const DALLE_COST_PER_IMAGE = 0.04; // USD, DALL-E 3 standard 1024×1024
+
+    let sessionId      = localStorage.getItem('dreamSessionId') || generateId();
+    let pendingFiles   = [];
+    let currentDreamId = null;
+    let pollInterval   = null;
+
+    localStorage.setItem('dreamSessionId', sessionId);
+
+    function generateId() {
+        return Math.random().toString(36).slice(2, 10);
+    }
+
+    // ── Cost estimate ──
+    function updateImageCount(val) {
+        document.getElementById('imageCountLabel').textContent = val;
+        const cost = (parseInt(val) * DALLE_COST_PER_IMAGE).toFixed(2);
+        document.getElementById('costEstimate').textContent = `~$${cost}`;
+    }
+    updateImageCount(3); // init
+
+    // ── Memory drop / select ──
+    function handleMemDrop(event) {
+        event.preventDefault();
+        document.getElementById('memDropZone').classList.remove('border-zinc-400','bg-white/5');
+        const files = Array.from(event.dataTransfer.files).filter(
+            f => f.type.startsWith('video/') || f.type.startsWith('image/') || f.type === 'text/plain'
+        );
+        if (files.length) { pendingFiles = files; ingestMemory(); }
+    }
+
+    function handleMemFiles(fileList) {
+        pendingFiles = Array.from(fileList).filter(
+            f => f.type.startsWith('video/') || f.type.startsWith('image/') || f.type === 'text/plain'
+        );
+        document.getElementById('memFileInput').value = '';
+        if (pendingFiles.length) ingestMemory();
+    }
+
+    async function ingestMemory() {
+        const text  = document.getElementById('memText').value.trim();
+        const files = pendingFiles;
+        if (!text && !files.length) { showError('Add a file or write something first.'); return; }
+
+        const btn = document.getElementById('ingestBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> Processing…';
+
+        const fd = new FormData();
+        fd.append('session_id', sessionId);
+        files.forEach(f => fd.append('media', f));
+        if (text) fd.append('text', text);
+
+        try {
+            const res  = await fetch('/api/dream/ingest', { method: 'POST', body: fd });
+            const data = await res.json();
+            if (data.error) { showError(data.error); return; }
+
+            pendingFiles = [];
+            document.getElementById('memText').value = '';
+            renderMemories(data.memories);
+            hideError();
+        } catch (e) {
+            showError('Server error: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Add to Memory';
+        }
+    }
+
+    async function deleteMemory(memoryId) {
+        try {
+            const res  = await fetch('/api/dream/memory/delete', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ session_id: sessionId, memory_id: memoryId }),
+            });
+            const data = await res.json();
+            if (data.ok) renderMemories(data.memories);
+        } catch (e) {
+            showError('Could not delete memory: ' + e.message);
+        }
+    }
+
+    function renderMemories(memories) {
+        const list  = document.getElementById('memoryList');
+        const tags  = document.getElementById('memoryTags');
+        const badge = document.getElementById('memBadge');
+
+        if (!memories.length) {
+            list.classList.add('hidden');
+            badge.classList.add('hidden');
+            return;
+        }
+
+        badge.textContent = `${memories.length} memor${memories.length === 1 ? 'y' : 'ies'}`;
+        badge.classList.remove('hidden');
+        list.classList.remove('hidden');
+        tags.innerHTML = '';
+
+        const TYPE_ICON = { video: '▶', image: '◉', text: '✎' };
+        memories.forEach(m => {
+            const id  = m.id || m.memory_id;
+            const tag = document.createElement('div');
+            tag.className = 'memory-tag';
+            tag.innerHTML = `
+                <span class="text-zinc-400 text-xs">${TYPE_ICON[m.type] || '◆'}</span>
+                <span class="truncate" style="max-width:180px" title="${m.caption}">${m.caption.slice(0, 48)}${m.caption.length > 48 ? '…' : ''}</span>
+                <button onclick="deleteMemory('${id}')" title="Remove">×</button>
+            `;
+            tags.appendChild(tag);
+        });
+    }
+
+    async function clearMemories() {
+        await fetch(`/api/dream/clear/${sessionId}`, { method: 'POST' });
+        document.getElementById('memoryList').classList.add('hidden');
+        document.getElementById('memoryTags').innerHTML = '';
+        document.getElementById('memBadge').classList.add('hidden');
+    }
+
+    // ── Phase A: recall ──
+    async function startRecall() {
+        const story = document.getElementById('bedtimeStory').value.trim();
+        if (!story) { showError('Write a bedtime story first.'); return; }
+
+        hideError();
+        setRecallBtn(true);
+        document.getElementById('recallResult').classList.add('hidden');
+        document.getElementById('recallProgress').classList.remove('hidden');
+        setProgress('recall', 0, 'Starting…');
+
+        try {
+            const res  = await fetch('/api/dream/recall', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ session_id: sessionId, bedtime_story: story }),
+            });
+            const data = await res.json();
+            if (data.error) { showError(data.error); setRecallBtn(false); return; }
+
+            currentDreamId = data.dream_id;
+            pollInterval   = setInterval(() => pollDream('recall'), 2500);
+        } catch (e) {
+            showError('Network error: ' + e.message);
+            setRecallBtn(false);
+        }
+    }
+
+    // ── Phase B: visualize ──
+    async function startVisualize() {
+        const count = parseInt(document.getElementById('imageCount').value);
+        hideError();
+        setVisualizeBtn(true);
+        document.getElementById('dreamResults').classList.add('hidden');
+        document.getElementById('visualizeProgress').classList.remove('hidden');
+        setProgress('visualize', 0, 'Starting…');
+
+        try {
+            const res  = await fetch('/api/dream/visualize', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ dream_id: currentDreamId, image_count: count }),
+            });
+            const data = await res.json();
+            if (data.error) { showError(data.error); setVisualizeBtn(false); return; }
+
+            pollInterval = setInterval(() => pollDream('visualize'), 2500);
+        } catch (e) {
+            showError('Network error: ' + e.message);
+            setVisualizeBtn(false);
+        }
+    }
+
+    async function pollDream(phase) {
+        if (!currentDreamId) return;
+        try {
+            const res  = await fetch(`/api/dream/status/${currentDreamId}`);
+            const data = await res.json();
+
+            setProgress(phase, data.progress || 0, data.message || '…');
+
+            if (phase === 'recall') {
+                if (data.status === 'recall_complete') {
+                    clearInterval(pollInterval);
+                    showRecallResult(data.recall || {});
+                } else if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    showError(data.error || 'Dream recall failed.');
+                    setRecallBtn(false);
+                }
+            } else {
+                if (data.status === 'complete') {
+                    clearInterval(pollInterval);
+                    await showVisualizeResult();
+                } else if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    showError(data.error || 'Image generation failed.');
+                    setVisualizeBtn(false);
+                }
+            }
+        } catch (_) {}
+    }
+
+    function showRecallResult(recall) {
+        document.getElementById('recallProgress').classList.add('hidden');
+        document.getElementById('recallResult').classList.remove('hidden');
+        setRecallBtn(false);
+
+        // Typewriter recall text
+        const el = document.getElementById('recallText');
+        el.textContent = '';
+        typewriter(recall.recall_text || '', el);
+
+        // Show inferred tone badge
+        if (recall.inferred_tone) {
+            const badge = document.getElementById('toneBadge');
+            badge.textContent = recall.inferred_tone;
+            badge.classList.remove('hidden');
+        }
+
+        // Reveal Step 4
+        document.getElementById('visualizeStep').classList.remove('hidden');
+        document.getElementById('visualizeStep').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    async function showVisualizeResult() {
+        const res    = await fetch(`/api/dream/result/${currentDreamId}`);
+        const result = await res.json();
+
+        document.getElementById('visualizeProgress').classList.add('hidden');
+        document.getElementById('dreamResults').classList.remove('hidden');
+        setVisualizeBtn(false);
+        document.getElementById('resetBtn').classList.remove('hidden');
+
+        // Image grid
+        const list = document.getElementById('imageList');
+        list.innerHTML = '';
+        (result.image_urls || []).forEach((url, i) => {
+            const a = document.createElement('a');
+            a.href     = url;
+            a.download = `dream_img${i + 1}.jpg`;
+            a.title    = 'Download';
+            a.innerHTML = `<img src="${url}" class="dream-image" alt="dream image ${i + 1}" loading="lazy">`;
+            list.appendChild(a);
+        });
+
+        // Audio
+        if (result.audio_url) {
+            document.getElementById('audioSection').classList.remove('hidden');
+            document.getElementById('recallAudio').src = result.audio_url;
+        }
+
+        // Video
+        if (result.video_url) {
+            document.getElementById('videoSection').classList.remove('hidden');
+            document.getElementById('dreamVideo').src         = result.video_url;
+            document.getElementById('downloadDreamLink').href = result.video_url;
+        }
+
+        document.getElementById('dreamResults').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ── UI helpers ──
+    function setProgress(phase, pct, msg) {
+        document.getElementById(`${phase}Bar`).style.width = pct + '%';
+        document.getElementById(`${phase}Pct`).textContent = pct + '%';
+        document.getElementById(`${phase}Msg`).textContent = msg;
+    }
+
+    function setRecallBtn(loading) {
+        const btn = document.getElementById('recallBtn');
+        btn.disabled = loading;
+        btn.innerHTML = loading
+            ? '<span class="spinner"></span> Dreaming…'
+            : 'Generate Dream Recall';
+    }
+
+    function setVisualizeBtn(loading) {
+        const btn = document.getElementById('visualizeBtn');
+        btn.disabled = loading;
+        btn.innerHTML = loading
+            ? '<span class="spinner"></span> Generating…'
+            : 'Generate Dream';
+    }
+
+    function resetDream() {
+        currentDreamId = null;
+        clearInterval(pollInterval);
+
+        document.getElementById('recallProgress').classList.add('hidden');
+        document.getElementById('recallResult').classList.add('hidden');
+        document.getElementById('recallText').textContent = '';
+        document.getElementById('toneBadge').classList.add('hidden');
+        setRecallBtn(false);
+
+        document.getElementById('visualizeStep').classList.add('hidden');
+        document.getElementById('visualizeProgress').classList.add('hidden');
+        document.getElementById('dreamResults').classList.add('hidden');
+        document.getElementById('imageList').innerHTML = '';
+        document.getElementById('audioSection').classList.add('hidden');
+        document.getElementById('videoSection').classList.add('hidden');
+        setVisualizeBtn(false);
+        document.getElementById('resetBtn').classList.add('hidden');
+
+        sessionId = generateId();
+        localStorage.setItem('dreamSessionId', sessionId);
+        document.getElementById('memoryList').classList.add('hidden');
+        document.getElementById('memoryTags').innerHTML = '';
+        document.getElementById('memBadge').classList.add('hidden');
+
+        hideError();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function showError(msg) {
+        document.getElementById('errorMsg').textContent = msg;
+        document.getElementById('errorBox').classList.remove('hidden');
+    }
+
+    function hideError() {
+        document.getElementById('errorBox').classList.add('hidden');
+    }
+
+    function typewriter(text, el, delay = 18) {
+        let i = 0;
+        el.textContent = '';
+        const timer = setInterval(() => {
+            el.textContent += text[i++];
+            if (i >= text.length) clearInterval(timer);
+        }, delay);
+    }
+
+    // Load existing memories on page load
+    window.onload = async () => {
+        try {
+            const res  = await fetch(`/api/dream/memories/${sessionId}`);
+            const data = await res.json();
+            if (data.memories && data.memories.length) renderMemories(data.memories);
+        } catch (_) {}
+    };
+</script>
+
+</body>
+</html>
