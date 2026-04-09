@@ -112,6 +112,13 @@ STYLE_PRESET = os.getenv('MOSH_STYLE_PRESET', 'nuclear').strip().lower()
 if STYLE_PRESET not in STYLE_PRESETS:
     STYLE_PRESET = 'nuclear'
 
+
+def resolve_style_preset(style_name: str = '') -> tuple[str, dict]:
+    candidate = (style_name or STYLE_PRESET).strip().lower()
+    if candidate not in STYLE_PRESETS:
+        candidate = STYLE_PRESET
+    return candidate, STYLE_PRESETS[candidate]
+
 # In-memory conversation history storage (job_id -> conversation)
 conversation_histories = {}
 video_influences = {}
@@ -593,8 +600,8 @@ def get_video_metadata(input_path: str) -> dict:
         }
 
 
-def normalize_ai_params(params: dict, video_metadata: dict) -> dict:
-    style = STYLE_PRESETS[STYLE_PRESET]
+def normalize_ai_params(params: dict, video_metadata: dict, style_name: str = '') -> dict:
+    _, style = resolve_style_preset(style_name)
     total_frames = max(1, int(video_metadata.get('total_frames', 300)))
     source_fps = float(video_metadata.get('fps', 30))
 
@@ -646,10 +653,10 @@ def build_ai_user_prompt(prompt: str, video_metadata: dict) -> str:
     )
 
 
-def parse_prompt_with_ai(prompt: str, api_key: str, video_metadata: dict) -> dict:
+def parse_prompt_with_ai(prompt: str, api_key: str, video_metadata: dict, style_name: str = '') -> dict:
     try:
         client = OpenAI(api_key=api_key)
-        style = STYLE_PRESETS[STYLE_PRESET]
+        style_key, style = resolve_style_preset(style_name)
 
         # OpenAI SDK has varying wrappers. The goal is to get a JSON-formatted model output.
         response = client.chat.completions.create(
@@ -683,19 +690,19 @@ def parse_prompt_with_ai(prompt: str, api_key: str, video_metadata: dict) -> dic
         content = content.strip()
         parsed = json.loads(content)
 
-        return normalize_ai_params(parsed, video_metadata)
+        return normalize_ai_params(parsed, video_metadata, style_key)
     except json.JSONDecodeError as jde:
         return {"error": f"AI response is not valid JSON: {jde}. Raw output: {content!r}"}
     except Exception as e:
         return {"error": str(e)}
 
 
-def run_mosh(input_path: str, output_path: str, params: dict, job_id: str) -> dict:
+def run_mosh(input_path: str, output_path: str, params: dict, job_id: str, style_name: str = '') -> dict:
     effect = params.get('effect', 'iframe_removal')
     start_frame = int(params.get('start_frame', 0))
     end_frame = int(params.get('end_frame', -1))
     fps = max(1, min(120, int(params.get('fps', 30))))
-    style = STYLE_PRESETS[STYLE_PRESET]
+    _, style = resolve_style_preset(style_name)
     delta = int(params.get('delta', style.get('default_delta', 8))) if effect == 'delta_repeat' else 0
     boosted_delta = delta
     if delta > 0:
@@ -897,6 +904,7 @@ def process():
     upload.save(input_path)
 
     use_manual = request.form.get('use_manual') == 'true'
+    style_preset = request.form.get('style_preset', '').strip().lower()
     api_key = get_server_api_key()
 
     prompt = request.form.get('prompt', '').strip()
@@ -922,13 +930,13 @@ def process():
                 return jsonify({'error': 'Server OpenAI API key is missing. Set OPENAI_API_KEY and restart.'}), 400
 
             video_metadata = get_video_metadata(input_path)
-            params = parse_prompt_with_ai(prompt, api_key, video_metadata)
+            params = parse_prompt_with_ai(prompt, api_key, video_metadata, style_preset)
             if 'error' in params:
                 safe_remove(input_path)
                 return jsonify({'error': f'AI error: {params["error"]}'}), 400
 
         # Run mosh processing synchronously so client UI has immediate access to output
-        result = run_mosh(input_path, output_path, params, job_id)
+        result = run_mosh(input_path, output_path, params, job_id, style_preset)
         if not result.get('success'):
             safe_remove(input_path)
             return jsonify({'success': False, 'error': result.get('error', 'Processing failed.')}), 500
@@ -1128,7 +1136,14 @@ def generate_image_endpoint():
     job_id = data.get('job_id', '').strip()
     prompt = data.get('prompt', '').strip()
     matrix_size = data.get('matrix_size', 8)
+    image_count = data.get('image_count', 1)
     api_key = get_server_api_key()
+
+    try:
+        image_count = int(image_count)
+    except (TypeError, ValueError):
+        image_count = 1
+    image_count = max(1, min(4, image_count))
 
     if not prompt:
         prompt = narrative_to_image_prompt(job_id, fallback_prompt=video_influences.get(job_id, ''))
@@ -1147,19 +1162,31 @@ def generate_image_endpoint():
         f"Dream narrative direction: {prompt} "
         f"Video frame cues to ground composition, setting, and mood: {frame_context or 'Use realistic visual continuity with the uploaded video.'}"
     )
-    image_url = generate_image(enhanced_prompt, api_key)
-
-    if "Error" in image_url:
-        return jsonify({'error': image_url}), 500
-
-    datamosh_ok, final_image_url = datamosh_generated_image(image_url, job_id or str(uuid.uuid4())[:8])
     movement_matrix = infer_movement_matrix(enhanced_prompt, api_key, grid_size=matrix_size)
+    base_job_id = job_id or str(uuid.uuid4())[:8]
+    images = []
+
+    for idx in range(image_count):
+        image_url = generate_image(enhanced_prompt, api_key)
+        if "Error" in image_url:
+            return jsonify({'error': image_url}), 500
+
+        datamosh_ok, final_image_url = datamosh_generated_image(image_url, f'{base_job_id}_{idx + 1}')
+        images.append({
+            'image_url': final_image_url,
+            'original_image_url': image_url,
+            'datamosh_applied': datamosh_ok
+        })
+
+    first_image = images[0]
 
     return jsonify({
         'success': True,
-        'image_url': final_image_url,
-        'original_image_url': image_url,
-        'datamosh_applied': datamosh_ok,
+        'image_url': first_image['image_url'],
+        'original_image_url': first_image['original_image_url'],
+        'datamosh_applied': first_image['datamosh_applied'],
+        'image_count': image_count,
+        'images': images,
         'prompt': prompt,
         'movement_matrix': movement_matrix
     })

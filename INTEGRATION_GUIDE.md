@@ -1,8 +1,8 @@
-# Dream Datamosh Studio — Integration Guide
+# DREAMING BLACK BOX — Integration Guide
 
 ## Overview
 
-Your `app.py` and `cart498_final_6.py` have been combined into a unified **Dream Datamosh Studio** — an ELIZA-style interactive application that:
+Your `app.py` and `cart498_final_6.py` have been combined into a unified **DREAMING BLACK BOX** — an ELIZA-style interactive application that:
 
 1. **Processes Videos** with datamoshing glitch effects (iframe_removal or delta_repeat)
 2. **Generates Narratives** based on the video, using AI to weave dream-like stories
@@ -270,4 +270,4 @@ Existing system requirements still apply:
 
 ---
 
-Enjoy your Dream Datamosh Studio! 🎬✨
+Enjoy your DREAMING BLACK BOX! 🎬✨

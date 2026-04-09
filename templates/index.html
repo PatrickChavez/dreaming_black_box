@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,">
-    <title>Dream Datamosh - AI Narrative & Glitch Studio</title>
+    <title>DREAMING BLACK BOX - AI Narrative & Glitch Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap');
@@ -128,7 +128,7 @@
 
         <!-- Header -->
         <div class="mb-10">
-            <h1 class="text-2xl font-semibold tracking-widest glitch mb-1.5">DREAM DATAMOSH STUDIO</h1>
+            <h1 class="text-2xl font-semibold tracking-widest glitch mb-1.5">DREAMING BLACK BOX</h1>
             <p class="text-zinc-500 text-xs">Upload video -> AI dream narrative -> reflective dialogue -> generated
                 dream image</p>
         </div>
@@ -175,63 +175,38 @@
                 alt="Uploaded image preview">
         </div>
 
-        <!-- Mode Tabs -->
-        <div class="flex gap-1 mb-4 bg-zinc-900 p-1 rounded-lg border border-zinc-800">
-            <button id="tab-ai" onclick="setMode('ai')"
-                class="flex-1 py-1.5 rounded text-xs font-medium transition-colors bg-violet-600 text-white">
-                ✦ AI Mode
-            </button>
-            <button id="tab-manual" onclick="setMode('manual')"
-                class="flex-1 py-1.5 rounded text-xs font-medium transition-colors text-zinc-400 hover:text-zinc-200">
-                Manual
-            </button>
-        </div>
-
-        <!-- AI Panel -->
-        <div id="panel-ai" class="mb-5">
+        <!-- Style Preset -->
+        <div class="mb-5">
             <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-                <label class="block text-xs text-zinc-500 mb-2 uppercase tracking-wider">Describe the effect</label>
-                <textarea id="prompt" rows="3"
-                    placeholder="e.g. 'glitchy transition in the middle of the clip' or 'melting smear starting at frame 80 with 6 repeating frames'"
-                    class="w-full bg-transparent text-sm placeholder-zinc-600 focus:outline-none resize-none leading-relaxed"></textarea>
+                <p class="block text-xs text-zinc-500 mb-2 uppercase tracking-wider">Style Preset</p>
+                <div class="grid grid-cols-2 gap-2 text-sm">
+                    <label class="flex items-center gap-2 bg-zinc-800 rounded px-3 py-2 cursor-pointer">
+                        <input type="radio" name="stylePreset" value="stable">
+                        <span>Stable</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-zinc-800 rounded px-3 py-2 cursor-pointer">
+                        <input type="radio" name="stylePreset" value="balanced">
+                        <span>Balanced</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-zinc-800 rounded px-3 py-2 cursor-pointer">
+                        <input type="radio" name="stylePreset" value="chaotic">
+                        <span>Chaotic</span>
+                    </label>
+                    <label class="flex items-center gap-2 bg-zinc-800 rounded px-3 py-2 cursor-pointer">
+                        <input type="radio" name="stylePreset" value="nuclear" checked>
+                        <span>Nuclear</span>
+                    </label>
+                </div>
             </div>
         </div>
 
-        <!-- Manual Panel -->
-        <div id="panel-manual" class="mb-5 hidden">
-            <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-4">
-                <div>
-                    <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">Effect Type</label>
-                    <select id="effect" onchange="toggleDeltaField()"
-                        class="w-full bg-zinc-800 rounded px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-violet-500">
-                        <option value="iframe_removal">I-frame removal — transition / freeze glitch</option>
-                        <option value="delta_repeat">Delta repeat — melting / smear effect</option>
-                    </select>
-                </div>
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">Start Frame</label>
-                        <input type="number" id="startFrame" value="0" min="0"
-                            class="w-full bg-zinc-800 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
-                    </div>
-                    <div>
-                        <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">End Frame</label>
-                        <input type="number" id="endFrame" value="-1"
-                            class="w-full bg-zinc-800 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
-                        <p class="text-xs text-zinc-600 mt-1">-1 = until end</p>
-                    </div>
-                    <div>
-                        <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">FPS</label>
-                        <input type="number" id="fps" value="30" min="1" max="120"
-                            class="w-full bg-zinc-800 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
-                    </div>
-                    <div id="deltaField">
-                        <label class="block text-xs text-zinc-500 mb-1.5 uppercase tracking-wider">Delta Frames</label>
-                        <input type="number" id="delta" value="8" min="1"
-                            class="w-full bg-zinc-800 rounded px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
-                        <p class="text-xs text-zinc-600 mt-1">frames to loop</p>
-                    </div>
-                </div>
+        <!-- Prompt -->
+        <div class="mb-5">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+                <label for="prompt" class="block text-xs text-zinc-500 mb-2 uppercase tracking-wider">Prompt</label>
+                <input id="prompt" type="text"
+                    placeholder="e.g. Was there plenty of water in your dream?"
+                    class="w-full bg-zinc-800 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500">
             </div>
         </div>
 
@@ -244,22 +219,10 @@
         <!-- Result Section -->
         <div id="result" class="mt-8 hidden space-y-6">
 
-            <!-- Video Processing Result -->
-            <div id="videoResult" class="hidden">
-                <h2 class="text-sm font-semibold text-zinc-400 mb-3 uppercase tracking-wider">✓ Video Processed</h2>
-                <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-4 space-y-3">
-                    <div id="effectParams" class="text-xs text-zinc-500 bg-zinc-800 rounded-md p-3"></div>
-                    <a id="downloadLink" href="#"
-                        class="block text-center w-full py-2.5 bg-violet-600 hover:bg-violet-500 rounded-lg text-sm font-medium transition-colors">
-                        Download moshed.mp4
-                    </a>
-                </div>
-            </div>
-
             <!-- Narrative Section -->
             <div id="narrativeSection" class="hidden">
                 <div class="flex items-center justify-between mb-3">
-                    <h2 class="text-sm font-semibold text-zinc-400 uppercase tracking-wider">Your Dream Narrative</h2>
+                    <h2 class="text-sm font-semibold text-zinc-400 uppercase tracking-wider">The Dream Narrative</h2>
                     <label class="text-xs text-zinc-500 flex items-center gap-2 cursor-pointer hover:text-zinc-300">
                         <input type="checkbox" id="useHistory" checked onchange="toggleHistoryUI()">
                         Keep history
@@ -287,7 +250,7 @@
                     </button>
                     <button onclick="clearHistoryBtn()"
                         class="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-sm font-medium transition-colors text-zinc-400">
-                        Reset
+                        Clear
                     </button>
                 </div>
                 <p id="narrativeMediaStatus" class="mt-2 text-xs text-zinc-500"></p>
@@ -300,6 +263,16 @@
                     <textarea id="imagePrompt" rows="4"
                         placeholder="Final dream image prompt (auto-filled from the narrative)..."
                         class="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-violet-500"></textarea>
+                    <div class="flex items-center gap-3">
+                        <label for="imageCount" class="text-xs text-zinc-500 uppercase tracking-wider">Images</label>
+                        <select id="imageCount"
+                            class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500">
+                            <option value="1" selected>1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                        </select>
+                    </div>
                     <button onclick="generateDreamImage()"
                         class="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
                         id="genImgBtn">
@@ -307,6 +280,7 @@
                     </button>
                 </div>
                 <div id="generatedImage" class="mt-4 hidden">
+                    <div id="generatedImageGrid" class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3"></div>
                     <div class="moving-preview-wrap">
                         <img id="dreamImage" src="" alt="Generated dream image">
                         <canvas id="dreamImageCanvas" class="hidden"></canvas>
@@ -355,12 +329,14 @@
             return _nativeFetch(input, init);
         };
 
-        let currentMode = 'ai';
         let selectedFile = null;
         let currentJobId = null;
         let selectedNarrativeMedia = null;
         let movementAnimFrame = null;
         let imageAnimFrame = null;
+        let generatedImages = [];
+        let generatedMovementMatrix = null;
+        let currentGeneratedImageIndex = 0;
         const DEFAULT_API_BASE = 'http://127.0.0.1:5000';
         let apiBase = DEFAULT_API_BASE;
         let lastNetworkAttempts = [];
@@ -442,23 +418,6 @@
             }
         }
 
-        function setMode(mode) {
-            currentMode = mode;
-            document.getElementById('panel-ai').classList.toggle('hidden', mode !== 'ai');
-            document.getElementById('panel-manual').classList.toggle('hidden', mode !== 'manual');
-
-            const active = 'flex-1 py-1.5 rounded text-xs font-medium transition-colors bg-violet-600 text-white';
-            const inactive = 'flex-1 py-1.5 rounded text-xs font-medium transition-colors text-zinc-400 hover:text-zinc-200';
-            document.getElementById('tab-ai').className = mode === 'ai' ? active : inactive;
-            document.getElementById('tab-manual').className = mode === 'manual' ? active : inactive;
-        }
-
-        function toggleDeltaField() {
-            const isDelta = document.getElementById('effect').value === 'delta_repeat';
-            document.getElementById('deltaField').style.opacity = isDelta ? '1' : '0.3';
-            document.getElementById('deltaField').style.pointerEvents = isDelta ? 'auto' : 'none';
-        }
-
         function checkServerMode() {
             const isFile = window.location.protocol === 'file:';
             const onBackendHost = window.location.protocol === 'http:' &&
@@ -527,8 +486,14 @@
             }
         }
 
+        function getSelectedStylePreset() {
+            const selected = document.querySelector('input[name="stylePreset"]:checked');
+            return selected ? selected.value : 'nuclear';
+        }
+
         async function processVideo() {
             if (!selectedFile) { showError('Please select a video file first.'); return; }
+            const isVideo = selectedFile && selectedFile.type && selectedFile.type.startsWith('video/');
 
             // Verify server is reachable and ffmpeg is present
             try {
@@ -538,7 +503,7 @@
                     showError(`${hint} (You can also set FFMPEG_PATH env variable.)`);
                     return;
                 }
-                if (currentMode === 'ai' && !ping.openai_configured) {
+                if (isVideo && !ping.openai_configured) {
                     showError('Server OpenAI API key is missing. Set OPENAI_API_KEY and restart the Flask app.');
                     return;
                 }
@@ -554,27 +519,17 @@
             const fd = new FormData();
             fd.append('video', selectedFile);
 
-            if (currentMode === 'ai') {
-                const prompt = document.getElementById('prompt').value.trim();
-                const isVideo = selectedFile && selectedFile.type && selectedFile.type.startsWith('video/');
-                if (isVideo && !prompt) { showError('Please describe the effect you want.'); resetBtn(); return; }
-                fd.append('prompt', prompt);
-                fd.append('use_manual', 'false');
-            } else {
-                fd.append('use_manual', 'true');
-                fd.append('effect', document.getElementById('effect').value);
-                fd.append('start_frame', document.getElementById('startFrame').value);
-                fd.append('end_frame', document.getElementById('endFrame').value);
-                fd.append('fps', document.getElementById('fps').value);
-                fd.append('delta', document.getElementById('delta').value);
-            }
+            const prompt = document.getElementById('prompt').value.trim();
+            if (isVideo && !prompt) { showError('Please describe the effect you want.'); resetBtn(); return; }
+            fd.append('prompt', prompt);
+            fd.append('style_preset', getSelectedStylePreset());
+            fd.append('use_manual', 'false');
 
             try {
                 const res = await fetchWithFallback('/api/process', { method: 'POST', body: fd });
                 const data = await res.json();
                 if (data.success) {
                     currentJobId = data.job_id;
-                    showResult(data);
                     showNarrativeSection();
                     applyDreamBootstrap(data);
                 } else {
@@ -587,40 +542,20 @@
             }
         }
 
-        function showResult(data) {
-            if (data.media_type !== 'video' || !data.params) {
-                document.getElementById('effectParams').textContent =
-                    'image upload detected\nno datamosh processing was run';
-                document.getElementById('downloadLink').removeAttribute('href');
-                document.getElementById('downloadLink').classList.add('hidden');
-                document.getElementById('videoResult').classList.remove('hidden');
-                document.getElementById('result').classList.remove('hidden');
-                return;
-            }
-
-            const p = data.params;
-            const effectLabel = p.effect === 'iframe_removal' ? 'I-frame removal' : 'Delta repeat';
-            const lines = [
-                `effect      ${effectLabel}`,
-                `start_frame ${p.start_frame}`,
-                `end_frame   ${p.end_frame === -1 ? 'end of video' : p.end_frame}`,
-                `fps         ${p.fps}`,
-                p.effect === 'delta_repeat' ? `delta       ${p.delta}` : null,
-            ].filter(Boolean).join('\n');
-
-            document.getElementById('effectParams').textContent = lines;
-            document.getElementById('downloadLink').href = `${apiBase}/api/download/${data.job_id}`;
-            document.getElementById('downloadLink').classList.remove('hidden');
-            document.getElementById('videoResult').classList.remove('hidden');
-            document.getElementById('result').classList.remove('hidden');
-        }
 
         function showNarrativeSection() {
+            document.getElementById('result').classList.remove('hidden');
             document.getElementById('narrativeSection').classList.remove('hidden');
             document.getElementById('imageSection').classList.remove('hidden');
             document.getElementById('narrativeText').textContent = '';
             document.getElementById('narrativeInput').value = '';
             document.getElementById('imagePrompt').value = '';
+            document.getElementById('generatedImage').classList.add('hidden');
+            document.getElementById('generatedImageGrid').innerHTML = '';
+            generatedImages = [];
+            generatedMovementMatrix = null;
+            currentGeneratedImageIndex = 0;
+            stopMovementPreview();
         }
 
         function applyDreamBootstrap(data) {
@@ -711,6 +646,7 @@
         async function generateDreamImage() {
             const prompt = document.getElementById('imagePrompt').value.trim();
             if (!prompt) { showError('Please provide an image description.'); return; }
+            const imageCount = Math.max(1, Math.min(4, parseInt(document.getElementById('imageCount').value || '1', 10) || 1));
 
             const btn = document.getElementById('genImgBtn');
             btn.disabled = true;
@@ -723,19 +659,23 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         job_id: currentJobId,
-                        prompt: prompt
+                        prompt: prompt,
+                        image_count: imageCount
                     })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    document.getElementById('dreamImage').src = data.image_url;
-                    document.getElementById('downloadImageLink').href = data.image_url;
+                    const images = Array.isArray(data.images) && data.images.length
+                        ? data.images
+                        : [{
+                            image_url: data.image_url,
+                            original_image_url: data.original_image_url,
+                            datamosh_applied: data.datamosh_applied
+                        }];
                     document.getElementById('generatedImage').classList.remove('hidden');
-                    startMovementPreview(data.image_url, data.movement_matrix);
-                    const matrixStatus = document.getElementById('matrixStatus');
-                    if (matrixStatus && data.datamosh_applied === false) {
-                        matrixStatus.textContent = 'Datamosh post-process fallback: showing original generated image.';
-                    }
+                    generatedMovementMatrix = data.movement_matrix || null;
+                    renderGeneratedImageGrid(images);
+                    setActiveGeneratedImage(0);
                     hideError();
                 } else {
                     showError(data.error || 'Failed to generate image.');
@@ -746,6 +686,46 @@
                 btn.disabled = false;
                 btn.innerHTML = 'Generate Final Dream Image';
             }
+        }
+
+        function renderGeneratedImageGrid(images) {
+            generatedImages = images || [];
+            const grid = document.getElementById('generatedImageGrid');
+            if (!grid) return;
+            grid.innerHTML = '';
+
+            generatedImages.forEach((img, index) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'generated-image-choice border border-zinc-700 rounded overflow-hidden bg-zinc-900 hover:border-violet-500 transition-colors';
+                btn.title = `Preview image ${index + 1}`;
+                btn.onclick = () => setActiveGeneratedImage(index);
+                btn.innerHTML = `
+                    <img src="${img.image_url}" alt="Generated dream image ${index + 1}" class="w-full h-20 object-cover">
+                    <div class="text-[11px] text-zinc-400 py-1">Image ${index + 1}</div>
+                `;
+                grid.appendChild(btn);
+            });
+        }
+
+        function setActiveGeneratedImage(index) {
+            if (!generatedImages.length) return;
+            currentGeneratedImageIndex = Math.max(0, Math.min(index, generatedImages.length - 1));
+            const current = generatedImages[currentGeneratedImageIndex];
+
+            document.getElementById('dreamImage').src = current.image_url;
+            document.getElementById('downloadImageLink').href = current.image_url;
+            startMovementPreview(current.image_url, generatedMovementMatrix);
+
+            const matrixStatus = document.getElementById('matrixStatus');
+            if (matrixStatus && current.datamosh_applied === false) {
+                matrixStatus.textContent = 'Datamosh post-process fallback: showing original generated image.';
+            }
+
+            document.querySelectorAll('.generated-image-choice').forEach((el, idx) => {
+                el.classList.toggle('border-violet-500', idx === currentGeneratedImageIndex);
+                el.classList.toggle('border-zinc-700', idx !== currentGeneratedImageIndex);
+            });
         }
 
         async function clearHistoryBtn() {
