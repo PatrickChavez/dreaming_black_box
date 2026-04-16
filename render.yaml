@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: datamoshing-main
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
